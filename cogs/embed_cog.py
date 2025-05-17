@@ -2,12 +2,13 @@ import discord
 import os
 import sqlite3
 import json
+# Remove re, datetime import
 from discord.ext import commands
 from discord import app_commands, ui
+from .. import utils # Import utils from parent directory
 
 # --- Database Setup ---
 # Path to the SQLite database file
-# Use a path relative to the script execution directory
 DB_PATH = os.path.join('data', 'embeds.db')
 
 # Ensure the data directory exists when this module is loaded
@@ -84,29 +85,8 @@ def delete_custom_embed(guild_id: int, embed_name: str):
     conn.close()
     return changes > 0
 
-# --- Helper Functions ---
-# (Same color helpers as before)
-
-def get_color_int(color_str: str):
-    """Converts hex color string (#RRGGBB) to integer."""
-    if not color_str:
-        return None
-    color_str = color_str.lstrip('#')
-    try:
-        return int(color_str, 16)
-    except ValueError:
-        return None # Invalid hex color
-
-def get_color_hex(color_int: int):
-    """Converts color integer to hex color string (#RRGGBB)."""
-    if color_int is None:
-        return ""
-    # Ensure it's within 24-bit range
-    color_int = max(0, min(0xFFFFFF, color_int))
-    return f"#{color_int:06X}"
 
 # --- Modal for Embed Input ---
-# (Same EmbedModal class as before)
 
 class EmbedModal(ui.Modal, title='Edit Custom Embed'):
     """Modal for creating and editing embed data."""
@@ -126,7 +106,7 @@ class EmbedModal(ui.Modal, title='Edit Custom Embed'):
             self.embed_description.default = existing_data.get('description', '')
             color_int = existing_data.get('color')
             if color_int is not None:
-                 self.embed_color.default = get_color_hex(color_int)
+                 self.embed_color.default = utils.get_color_hex(color_int) # Use helper from utils
 
             fields = existing_data.get('fields')
             if fields and isinstance(fields, list) and len(fields) > 0:
@@ -144,7 +124,7 @@ class EmbedModal(ui.Modal, title='Edit Custom Embed'):
         title = self.embed_title.value.strip() or None
         description = self.embed_description.value.strip() or None
         color_str = self.embed_color.value.strip()
-        color = get_color_int(color_str) if color_str else None
+        color = utils.get_color_int(color_str) if color_str else None # Use helper from utils
 
         embed_data = {}
         if title:
@@ -163,7 +143,12 @@ class EmbedModal(ui.Modal, title='Edit Custom Embed'):
         try:
             save_custom_embed(guild_id, self.embed_name, embed_data)
             action = "updated" if self.existing_data else "created"
-            await interaction.response.send_message(f"Custom embed '{self.embed_name}' {action} successfully!", ephemeral=True)
+            # Updated message to inform about variables
+            await interaction.response.send_message(
+                f"Custom embed '{self.embed_name}' {action} successfully!"
+                f"\nYou can use variables like {{user.mention}}, {{server.name}}, {{channel.name}}, etc."
+                f"\nUse `/embed view {self.embed_name}` to preview."
+                , ephemeral=True)
 
         except Exception as e:
             print(f"Database error saving embed: {e}")
@@ -177,7 +162,7 @@ class EmbedModal(ui.Modal, title='Edit Custom Embed'):
 # --- Embed Cog Class ---
 
 class EmbedCog(commands.Cog):
-    """Cog for managing custom server embeds."""
+    """Cog for managing custom server embeds and using them."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -193,11 +178,25 @@ class EmbedCog(commands.Cog):
             welcome_embed_data = get_custom_embed(guild.id, "welcome")
             if welcome_embed_data:
                 try:
-                    embed = discord.Embed.from_dict(welcome_embed_data)
-                    if embed.description:
-                         embed.description = embed.description.replace("{user}", member.mention).replace("{server}", guild.name)
-                    elif not embed.description and embed.title:
-                         embed.description = f"Hello {member.mention}!"
+                    processed_embed_data = welcome_embed_data.copy()
+
+                    # Process title, description, and fields for variables
+                    if 'title' in processed_embed_data:
+                        processed_embed_data['title'] = utils.replace_variables(processed_embed_data['title'], member=member, guild=guild, channel=channel) # Use from utils
+                    if 'description' in processed_embed_data:
+                        processed_embed_data['description'] = utils.replace_variables(processed_embed_data['description'], member=member, guild=guild, channel=channel) # Use from utils
+
+                    if 'fields' in processed_embed_data and isinstance(processed_embed_data['fields'], list):
+                        for field in processed_embed_data['fields']:
+                            if 'name' in field:
+                                field['name'] = utils.replace_variables(field['name'], member=member, guild=guild, channel=channel) # Use from utils
+                            if 'value' in field:
+                                field['value'] = utils.replace_variables(field['value'], member=member, guild=guild, channel=channel) # Use from utils
+
+                    embed = discord.Embed.from_dict(processed_embed_data)
+
+                    if member.avatar and not embed.thumbnail:
+                         embed.set_thumbnail(url=member.avatar.url)
 
                     await channel.send(embed=embed)
                 except Exception as e:
@@ -207,7 +206,7 @@ class EmbedCog(commands.Cog):
                 embed = discord.Embed(
                     title=f"Welcome to {guild.name}!",
                     description=f"Hello {member.mention}, welcome aboard!",
-                    color=discord.Color.green()
+                    color=utils.get_color_int("00FF00") # Use helper from utils, default green
                 )
                 if member.avatar:
                      embed.set_thumbnail(url=member.avatar.url)
@@ -215,14 +214,7 @@ class EmbedCog(commands.Cog):
 
 
     # Embed Management Slash Command Group (defined within the Cog)
-    # Commands defined directly in the Cog class become part of its command tree
-    # Use self.bot.tree if you want global commands from this cog
-
-    # Create a command group named 'embed'
     embed_group = app_commands.Group(name='embed', description='Manage custom server embeds.')
-
-    # Add the group's commands as methods
-    # The group is automatically added to the bot's tree when the cog is added
 
     @embed_group.command(name='add', description='Create a new custom embed template.')
     @app_commands.describe(name='A unique name for this embed template.')
@@ -277,10 +269,11 @@ class EmbedCog(commands.Cog):
             embed.set_footer(text=f"Total: {len(embed_names)} embeds")
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @embed_group.command(name='view', description='Preview a custom embed template.')
+
+    @embed_group.command(name='view', description='Preview a custom embed template with variables replaced.')
     @app_commands.describe(name='The name of the embed template to preview.')
     async def embed_view(self, interaction: discord.Interaction, name: str):
-        """Previews a custom embed."""
+        """Previews a custom embed with variables replaced."""
         if interaction.guild_id is None:
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
@@ -292,11 +285,26 @@ class EmbedCog(commands.Cog):
             return
 
         try:
-            embed = discord.Embed.from_dict(embed_data)
+            processed_embed_data = embed_data.copy()
+
+            if 'title' in processed_embed_data:
+                processed_embed_data['title'] = utils.replace_variables(processed_embed_data['title'], user=interaction.user, guild=interaction.guild, channel=interaction.channel) # Use from utils
+            if 'description' in processed_embed_data:
+                processed_embed_data['description'] = utils.replace_variables(processed_embed_data['description'], user=interaction.user, guild=interaction.guild, channel=interaction.channel) # Use from utils
+
+            if 'fields' in processed_embed_data and isinstance(processed_embed_data['fields'], list):
+                for field in processed_embed_data['fields']:
+                    if 'name' in field:
+                        field['name'] = utils.replace_variables(field['name'], user=interaction.user, guild=interaction.guild, channel=interaction.channel) # Use from utils
+                    if 'value' in field:
+                        field['value'] = utils.replace_variables(field['value'], user=interaction.user, guild=interaction.guild, channel=interaction.channel) # Use from utils
+
+            embed = discord.Embed.from_dict(processed_embed_data)
             await interaction.response.send_message("Preview:", embed=embed)
         except Exception as e:
             print(f"Error creating embed from data: {e}")
             await interaction.response.send_message(f"Could not create embed from data for '{name}'. Error: {e}", ephemeral=True)
+
 
     @embed_group.command(name='remove', description='Delete a custom embed template.')
     @app_commands.describe(name='The name of the embed template to delete.')
@@ -324,7 +332,6 @@ class EmbedCog(commands.Cog):
             await interaction.response.send_message(f"An unexpected error occurred: {error}", ephemeral=True)
 
     # Attach error handlers to commands
-    # This needs to be done after the methods are defined
     embed_add.error(embed_command_error)
     embed_edit.error(embed_command_error)
     embed_list.error(embed_command_error)
@@ -332,8 +339,6 @@ class EmbedCog(commands.Cog):
 
 
 # --- Setup function ---
-# This is required by discord.py to load the cog
 async def setup(bot: commands.Bot):
     """Sets up the Embed cog."""
     await bot.add_cog(EmbedCog(bot))
-    # No need to sync here, sync is done in on_ready in bot.py
