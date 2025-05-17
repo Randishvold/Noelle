@@ -2,7 +2,9 @@ import discord
 import os
 from discord.ext import commands
 
-# Define Intents
+
+TOKEN = os.environ["DC_TOKEN"]
+# Define intents
 # Pastikan intents yang diaktifkan di portal developer juga diaktifkan di kode
 intents = discord.Intents.default()
 intents.message_content = True # WAJIB jika bot perlu membaca isi pesan
@@ -11,7 +13,7 @@ intents.presences = True # Berguna untuk status user/bot
 
 # Create a bot instance
 # prefix='!' artinya perintah bot diawali dengan '!' contoh: !ping
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix='/', intents=intents)
 
 # Event: Bot siap
 @bot.event
@@ -43,4 +45,7 @@ async def hello(ctx):
 
 # Jalankan bot
 if __name__ == "__main__":
-    bot.run(os.environ["DC_TOKEN"])
+    if TOKEN is None:
+        print("Error: DISCORD_TOKEN not found in environment variables!")
+    else:
+        bot.run(TOKEN)
