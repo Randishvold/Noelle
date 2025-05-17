@@ -22,42 +22,73 @@ class BasicCommandsCog(commands.Cog):
 
     @app_commands.command(name="say", description="Makes the bot say something with variable support.")
     @app_commands.describe(text="The text for the bot to say (supports variables).")
-    @app_commands.describe(channel="The channel to send the message in (optional).") # Optional argument for channel
+    @app_commands.describe(channel="The channel to send the message in (optional).")
+    @commands.has_permissions(manage_messages=True) # Added permission check for /say
     async def say_slash(self, interaction: discord.Interaction, text: str, channel: discord.TextChannel = None):
         """Makes the bot say something with variables."""
-        # Use interaction.channel if channel is None (default to current channel)
         target_channel = channel if channel is not None else interaction.channel
 
-        if target_channel is None: # Should not happen in guild commands, but safety check
+        if target_channel is None:
              await interaction.response.send_message("Could not determine a channel to send the message to.", ephemeral=True)
              return
 
-        # Replace variables in the input text
-        # Provide all available context from the interaction
         processed_text = utils.replace_variables(
             text,
             user=interaction.user,
             member=interaction.user, # User is also a member in a guild
             guild=interaction.guild,
             channel=interaction.channel # Context of the command invocation channel
-            # Note: For the target_channel variable replacement, we pass interaction.channel
-            # This means {channel.name} etc. will refer to the channel where the command was invoked,
-            # not the target channel where the message is sent. Adjust replace_variables if needed
-            # to specify which channel context to use for channel variables.
-            # A simpler approach for now is to only use interaction.channel as the channel context.
         )
 
         try:
             await target_channel.send(processed_text)
-            # Acknowledge the command interaction (important for slash commands)
-            # Use followup.send because response.send_message is often used for the *actual* message
-            # Or use response.send_message here and make the bot say the message via followup
-            # Let's acknowledge ephemerally first.
             await interaction.response.send_message(f"Message sent to {target_channel.mention}!", ephemeral=True)
 
         except Exception as e:
             print(f"Error sending message via /say: {e}")
             await interaction.response.send_message(f"Failed to send message: {e}", ephemeral=True)
+
+    # --- New Command: /variables ---
+    @app_commands.command(name="variables", description="Lists available text variables and their usage.")
+    async def variables_slash(self, interaction: discord.Interaction):
+        """Lists available variables and their descriptions."""
+        available_variables = utils.get_available_variables() # Get the dictionary from utils
+
+        if not available_variables:
+            await interaction.response.send_message("No variables are currently defined.", ephemeral=True)
+            return
+
+        # Sort variables alphabetically for cleaner output
+        sorted_variables = sorted(available_variables.items())
+
+        # Format variables for the embed description
+        variable_list_text = "\n".join(
+            f"`{{{name}}}` - {description}" for name, description in sorted_variables
+        )
+
+        embed = discord.Embed(
+            title="Available Variables",
+            description="You can use these variables inside custom embeds or with commands like `/say`.\n\n" + variable_list_text,
+            color=discord.Color.purple()
+        )
+        embed.set_footer(text="Variables are replaced based on the context (user, server, channel).")
+
+        # Send the embed ephemerally so only the user who ran the command sees the list
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # --- Error Handler for /say and /variables (add to the existing one if you have one, or create) ---
+    # Assuming you have a general error handler or add one like this:
+    async def basic_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        """Error handler for basic commands."""
+        if isinstance(error, app_commands.MissingPermissions):
+             await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        else:
+            print(f"Error in basic command: {error}")
+            await interaction.response.send_message(f"An unexpected error occurred: {error}", ephemeral=True)
+
+    # Attach error handlers to the new commands (and existing ones if needed)
+    say_slash.error(basic_command_error)
+    variables_slash.error(basic_command_error)
 
 
 # --- Setup function ---
