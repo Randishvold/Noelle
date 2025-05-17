@@ -2,9 +2,11 @@ import discord
 import os
 import sqlite3
 import json
-# Remove the relative import
-# from .. import utils
-import utils # Now import directly as utils
+# Remove re, datetime import - they are now in utils
+from discord.ext import commands
+from discord import app_commands
+import discord.ui as ui # <-- FIX: Import discord.ui explicitly as ui
+import utils # Import utils from the project root
 
 # --- Database Setup ---
 # Path to the SQLite database file
@@ -87,6 +89,7 @@ def delete_custom_embed(guild_id: int, embed_name: str):
 
 
 # --- Modal for Embed Input ---
+# ui.Modal and ui.TextInput are now correctly referenced via the imported 'ui' module
 
 class EmbedModal(ui.Modal, title='Edit Custom Embed'):
     """Modal for creating and editing embed data."""
@@ -111,9 +114,12 @@ class EmbedModal(ui.Modal, title='Edit Custom Embed'):
             fields = existing_data.get('fields')
             if fields and isinstance(fields, list) and len(fields) > 0:
                 if 'name' in fields[0]:
-                    self.field1_name.default = fields[0]['name']
+                    field_name_value = fields[0].get('name', '')
+                    # Ensure field name/value are strings before setting default
+                    self.field1_name.default = str(field_name_value) if field_name_value is not None else ''
                 if 'value' in fields[0]:
-                    self.field1_value.default = fields[0]['value']
+                    field_value_value = fields[0].get('value', '')
+                    self.field1_value.default = str(field_value_value) if field_value_value is not None else ''
 
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -179,16 +185,16 @@ class EmbedCog(commands.Cog):
                 try:
                     processed_embed_data = welcome_embed_data.copy()
 
-                    if 'title' in processed_embed_data:
+                    if 'title' in processed_embed_data and processed_embed_data['title']: # Check if title exists and is not empty
                         processed_embed_data['title'] = utils.replace_variables(processed_embed_data['title'], member=member, guild=guild, channel=channel)
-                    if 'description' in processed_embed_data:
+                    if 'description' in processed_embed_data and processed_embed_data['description']: # Check if description exists and is not empty
                         processed_embed_data['description'] = utils.replace_variables(processed_embed_data['description'], member=member, guild=guild, channel=channel)
 
                     if 'fields' in processed_embed_data and isinstance(processed_embed_data['fields'], list):
                         for field in processed_embed_data['fields']:
-                            if 'name' in field:
+                            if 'name' in field and field['name']: # Check if name exists and is not empty
                                 field['name'] = utils.replace_variables(field['name'], member=member, guild=guild, channel=channel)
-                            if 'value' in field:
+                            if 'value' in field and field['value']: # Check if value exists and is not empty
                                 field['value'] = utils.replace_variables(field['value'], member=member, guild=guild, channel=channel)
 
                     embed = discord.Embed.from_dict(processed_embed_data)
@@ -266,6 +272,7 @@ class EmbedCog(commands.Cog):
             embed.set_footer(text=f"Total: {len(embed_names)} embeds")
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
     @embed_group.command(name='view', description='Preview a custom embed template with variables replaced.')
     @app_commands.describe(name='The name of the embed template to preview.')
     async def embed_view(self, interaction: discord.Interaction, name: str):
@@ -283,16 +290,16 @@ class EmbedCog(commands.Cog):
         try:
             processed_embed_data = embed_data.copy()
 
-            if 'title' in processed_embed_data:
+            if 'title' in processed_embed_data and processed_embed_data['title']:
                 processed_embed_data['title'] = utils.replace_variables(processed_embed_data['title'], user=interaction.user, guild=interaction.guild, channel=interaction.channel)
-            if 'description' in processed_embed_data:
+            if 'description' in processed_embed_data and processed_embed_data['description']:
                 processed_embed_data['description'] = utils.replace_variables(processed_embed_data['description'], user=interaction.user, guild=interaction.guild, channel=interaction.channel)
 
             if 'fields' in processed_embed_data and isinstance(processed_embed_data['fields'], list):
                 for field in processed_embed_data['fields']:
-                    if 'name' in field:
+                    if 'name' in field and field['name']:
                         field['name'] = utils.replace_variables(field['name'], user=interaction.user, guild=interaction.guild, channel=interaction.channel)
-                    if 'value' in field:
+                    if 'value' in field and field['value']:
                         field['value'] = utils.replace_variables(field['value'], user=interaction.user, guild=interaction.guild, channel=interaction.channel)
 
             embed = discord.Embed.from_dict(processed_embed_data)
