@@ -1,8 +1,16 @@
 import discord
 import os
+import sys # Import sys
 from discord.ext import commands
 from dotenv import load_dotenv
-import asyncio # Needed for async file operations
+import asyncio
+
+# --- Add the project root directory to sys.path ---
+# This allows absolute imports from the project root
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+# -------------------------------------------------
 
 # Load environment variables from .env file if it exists (for local testing)
 load_dotenv()
@@ -23,10 +31,11 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 async def load_cogs():
     """Loads all cogs from the 'cogs' directory."""
-    cogs_dir = os.path.join(os.path.dirname(__file__), 'cogs')
+    cogs_dir = os.path.join(PROJECT_ROOT, 'cogs') # Use PROJECT_ROOT
     for filename in os.listdir(cogs_dir):
         if filename.endswith('.py') and filename != '__init__.py':
-            cog_name = f'cogs.{filename[:-3]}' # Format as package.module (e.g., cogs.embed_cog)
+            # Use absolute import path based on project structure
+            cog_name = f'cogs.{filename[:-3]}' # e.g., 'cogs.embed_cog'
             try:
                 await bot.load_extension(cog_name)
                 print(f'Loaded cog: {cog_name}')
@@ -65,10 +74,8 @@ if __name__ == "__main__":
         print("- On Railway: Go to the Railway dashboard, select your bot service, open the 'Variables' tab, and add a variable with NAME='DISCORD_TOKEN' and VALUE='YOUR_BOT_TOKEN'.")
     else:
         print("Starting bot...")
-        # bot.run is synchronous, so load_cogs needs to be awaited
-        # However, on_ready is called by bot.run automatically after connecting.
-        # So, load_cogs is called inside on_ready.
         try:
+            # The load_cogs and sync are now handled within on_ready
             bot.run(TOKEN)
         except Exception as e:
             print(f"Bot failed to run: {e}")

@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from .. import utils # Import utils from parent directory
+import utils 
 
 class BasicCommandsCog(commands.Cog):
     """Basic utility commands."""
@@ -37,7 +37,7 @@ class BasicCommandsCog(commands.Cog):
             user=interaction.user,
             member=interaction.user, # User is also a member in a guild
             guild=interaction.guild,
-            channel=interaction.channel # Context of the command invocation channel
+            channel=interaction.channel
         )
 
         try:
@@ -48,20 +48,17 @@ class BasicCommandsCog(commands.Cog):
             print(f"Error sending message via /say: {e}")
             await interaction.response.send_message(f"Failed to send message: {e}", ephemeral=True)
 
-    # --- New Command: /variables ---
     @app_commands.command(name="variables", description="Lists available text variables and their usage.")
     async def variables_slash(self, interaction: discord.Interaction):
         """Lists available variables and their descriptions."""
-        available_variables = utils.get_available_variables() # Get the dictionary from utils
+        available_variables = utils.get_available_variables()
 
         if not available_variables:
             await interaction.response.send_message("No variables are currently defined.", ephemeral=True)
             return
 
-        # Sort variables alphabetically for cleaner output
         sorted_variables = sorted(available_variables.items())
 
-        # Format variables for the embed description
         variable_list_text = "\n".join(
             f"`{{{name}}}` - {description}" for name, description in sorted_variables
         )
@@ -73,11 +70,9 @@ class BasicCommandsCog(commands.Cog):
         )
         embed.set_footer(text="Variables are replaced based on the context (user, server, channel).")
 
-        # Send the embed ephemerally so only the user who ran the command sees the list
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # --- Error Handler for /say and /variables (add to the existing one if you have one, or create) ---
-    # Assuming you have a general error handler or add one like this:
+    # Error handler for /say and /variables
     async def basic_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         """Error handler for basic commands."""
         if isinstance(error, app_commands.MissingPermissions):
@@ -86,7 +81,6 @@ class BasicCommandsCog(commands.Cog):
             print(f"Error in basic command: {error}")
             await interaction.response.send_message(f"An unexpected error occurred: {error}", ephemeral=True)
 
-    # Attach error handlers to the new commands (and existing ones if needed)
     say_slash.error(basic_command_error)
     variables_slash.error(basic_command_error)
 
@@ -95,4 +89,3 @@ class BasicCommandsCog(commands.Cog):
 async def setup(bot: commands.Bot):
     """Sets up the BasicCommands cog."""
     await bot.add_cog(BasicCommandsCog(bot))
-    # No need to sync here, sync is done in on_ready in bot.py
