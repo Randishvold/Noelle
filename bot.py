@@ -43,7 +43,7 @@ async def hello(ctx):
 
 # Jalankan bot
 if __name__ == "__main__":
-    if TOKEN is None:
+    if DC_TOKEN is None:
         print("Error: DISCORD_TOKEN not found in environment variables!")
     else:
         bot.run(os.environ["DC_TOKEN"])
