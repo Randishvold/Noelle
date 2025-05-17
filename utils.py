@@ -31,24 +31,25 @@ def format_date(dt: datetime.datetime):
 # --- Variable Definitions and Descriptions ---
 
 # Define the variable mapping (used by replace_variables)
+# FIX: Modify all lambdas to accept all potential context arguments as optional keyword arguments
 _variable_mapping = {
-    'user.name': lambda user=None, member=None: (user.name if user else member.name) if (user or member) else 'Unknown User',
-    'user.tag': lambda user=None, member=None: (user.discriminator if user and user.discriminator != '0' else user.name if user else member.discriminator if member and member.discriminator != '0' else member.name if member else 'Unknown User') if (user or member) else 'Unknown User', # Handle new Discord username system
-    'user.mention': lambda user=None, member=None: (user.mention if user else member.mention) if (user or member) else 'Unknown User',
-    'user.id': lambda user=None, member=None: (user.id if user else member.id) if (user or member) else 'Unknown User',
-    'user.created_at': lambda user=None, member=None: format_date((user.created_at if user else member.created_at)) if (user or member) else 'Unknown Date',
+    'user.name': lambda user=None, member=None, guild=None, channel=None: (user.name if user else member.name) if (user or member) else 'Unknown User',
+    'user.tag': lambda user=None, member=None, guild=None, channel=None: (user.discriminator if user and user.discriminator != '0' else user.name if user else member.discriminator if member and member.discriminator != '0' else member.name if member else 'Unknown User') if (user or member) else 'Unknown User', # Handle new Discord username system
+    'user.mention': lambda user=None, member=None, guild=None, channel=None: (user.mention if user else member.mention) if (user or member) else 'Unknown User',
+    'user.id': lambda user=None, member=None, guild=None, channel=None: (user.id if user else member.id) if (user or member) else 'Unknown User',
+    'user.created_at': lambda user=None, member=None, guild=None, channel=None: format_date((user.created_at if user else member.created_at)) if (user or member) else 'Unknown Date',
 
-    'server.name': lambda guild=None: guild.name if guild else 'Unknown Server',
-    'server.id': lambda guild=None: guild.id if guild else 'Unknown Server',
-    'server.member_count': lambda guild=None: guild.member_count if guild else 'Unknown Count',
-    'server.created_at': lambda guild=None: format_date(guild.created_at) if guild and guild.created_at else 'Unknown Date',
+    'server.name': lambda user=None, member=None, guild=None, channel=None: guild.name if guild else 'Unknown Server',
+    'server.id': lambda user=None, member=None, guild=None, channel=None: guild.id if guild else 'Unknown Server',
+    'server.member_count': lambda user=None, member=None, guild=None, channel=None: guild.member_count if guild else 'Unknown Count',
+    'server.created_at': lambda user=None, member=None, guild=None, channel=None: format_date(guild.created_at) if guild and guild.created_at else 'Unknown Date',
 
-    'channel.name': lambda channel=None: channel.name if channel else 'Unknown Channel',
-    'channel.id': lambda channel=None: channel.id if channel else 'Unknown Channel',
-    'channel.mention': lambda channel=None: channel.mention if channel else 'Unknown Channel',
+    'channel.name': lambda user=None, member=None, guild=None, channel=None: channel.name if channel else 'Unknown Channel',
+    'channel.id': lambda user=None, member=None, guild=None, channel=None: channel.id if channel else 'Unknown Channel',
+    'channel.mention': lambda user=None, member=None, guild=None, channel=None: channel.mention if channel else 'Unknown Channel',
 }
 
-# Define user-friendly descriptions for each variable
+# Define user-friendly descriptions (remains the same)
 VARIABLE_DESCRIPTIONS = {
     'user.name': 'Nama pengguna (mis: NamaPengguna).',
     'user.tag': 'Tag pengguna (mis: NamaPengguna#1234).',
@@ -71,44 +72,35 @@ def get_available_variables():
     return VARIABLE_DESCRIPTIONS
 
 # --- Variable Replacement Function ---
-# (replace_variables function remains mostly the same, uses _variable_mapping)
 
 def replace_variables(text: str, user: discord.User = None, member: discord.Member = None, guild: discord.Guild = None, channel: discord.TextChannel = None):
     """Replaces placeholder variables in text with actual values."""
     if not isinstance(text, str):
         return text
 
-    # Regex to find patterns like {category.variable}
     pattern = re.compile(r'\{(\w+\.\w+)\}')
 
     def replacer(match):
         """Function to replace each matched variable pattern."""
-        variable_name = match.group(1) # e.g., 'user.mention'
-        # Look up the variable name in the mapping and call the lambda
-        # Pass available context objects to the lambda
+        variable_name = match.group(1)
+
         try:
-            # Get the lambda function from the mapping
             value_lambda = _variable_mapping.get(variable_name)
             if value_lambda:
-                # Call the lambda, passing the relevant context objects
-                # Use **locals() if you want to pass all current local variables,
-                # but explicitly passing is clearer.
-                # We pass the context objects the lambda expects (user, member, guild, channel)
+                # FIX: Explicitly pass all context arguments to the lambda
                 return str(value_lambda(user=user, member=member, guild=guild, channel=channel))
             else:
-                 # If variable name not in mapping
                  print(f"Warning: Unknown variable '{variable_name}' found in text.")
-                 return match.group(0) # Return original pattern if not found
+                 return match.group(0)
 
         except Exception as e:
-            # Log error if value retrieval fails (e.g., missing required context for the specific lambda)
-            print(f"Error replacing variable '{variable_name}': {e}")
-            # Return an error indicator, maybe with a description if available
+            # Log error and return error indicator
             desc = VARIABLE_DESCRIPTIONS.get(variable_name, "Unknown variable")
+            print(f"Error replacing variable '{variable_name}': {e}")
+            # Include the variable name and description in the error output
             return f"{{error:{variable_name}: {desc}}}"
 
 
-    # Perform the replacement
     processed_text = pattern.sub(replacer, text)
 
     return processed_text
