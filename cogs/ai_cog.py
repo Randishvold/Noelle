@@ -1,3 +1,4 @@
+--- START OF FILE cogs/ai_cog.py (FINAL REVISED) ---
 import discord
 import os
 import google.generativeai as genai
@@ -10,8 +11,9 @@ from PIL import Image # Required for handling image inputs
 import io # Required for handling image bytes
 import asyncio # Required for async operations like sleep and typing
 import re # Required for potential URL finding
-# Import specific exception types if needed, directly from genai or genai.types
-import google.generativeai.types as genai_types # Contains BlockedPromptException, StopCandidateException etc.
+import base64 # Required for decoding inline image data
+# Import specific exception types from genai.types
+import google.generativeai.types as genai_types
 
 
 # Configure logging
@@ -22,11 +24,15 @@ _logger = logging.getLogger(__name__)
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 
 # --- Initialize Google AI ---
-_flash_model = None # Only using gemini-2.0-flash as requested
+# Use standard gemini-2.0-flash for mention responses and AI channel conversation/analysis
+_flash_text_model = None
+# Use gemini-2.0-flash-preview-image-generation ONLY for the explicit generate_image command
+_flash_image_gen_model = None
+
 
 def initialize_gemini():
-    """Initializes the Google Generative AI client and the gemini-2.0-flash model."""
-    global _flash_model
+    """Initializes the Google Generative AI client and the required models."""
+    global _flash_text_model, _flash_image_gen_model
 
     if GOOGLE_API_KEY is None:
         _logger.error("GOOGLE_API_KEY environment variable not set. Skipping Gemini initialization. AI features will be unavailable.")
@@ -36,32 +42,38 @@ def initialize_gemini():
         genai.configure(api_key=GOOGLE_API_KEY)
         _logger.info("Gemini client configured.")
 
-        # Initialize the requested model
+        # Initialize standard gemini-2.0-flash model (for text/vision in AI channel & mention text)
         try:
-            # It's good practice to list models to ensure the key is valid and model exists,
-            # but this adds delay. Let's keep it commented for faster startup but know it's an option.
-            # try:
-            #     print("Available Gemini models:")
-            #     for m in genai.list_models():
-            #          print(f"- {m.name}")
-            # except Exception as list_e:
-            #      _logger.warning(f"Could not list models: {list_e}")
-
-
-            _flash_model = genai.GenerativeModel('gemini-2.0-flash')
-            _logger.info("Initialized model: gemini-2.0-flash")
+            _flash_text_model = genai.GenerativeModel('gemini-2.0-flash')
+            _logger.info("Initialized text/vision model: gemini-2.0-flash")
         except Exception as e:
-            _logger.error(f"Failed to initialize model 'gemini-2.0-flash': {e}", exc_info=True) # Log traceback on error
-            _flash_model = None
+            _logger.error(f"Failed to initialize text/vision model 'gemini-2.0-flash': {e}", exc_info=True)
 
-        if _flash_model:
-             _logger.info("Gemini model initialized successfully.")
+        # Initialize image generation model (for generate_image command)
+        # Check if this model name is available
+        try:
+            # Optional check: list models to confirm name
+            # available_models = [m.name for m in genai.list_models()]
+            # if 'gemini-2.0-flash-preview-image-generation' not in available_models:
+            #      _logger.warning("'gemini-2.0-flash-preview-image-generation' model not listed as available.")
+            #      # Continue anyway, maybe it's available even if not listed widely yet
+
+            _flash_image_gen_model = genai.GenerativeModel('gemini-2.0-flash-preview-image-generation')
+            _logger.info("Initialized image generation model: gemini-2.0-flash-preview-image-generation")
+        except Exception as e:
+            _logger.error(f"Failed to initialize image generation model 'gemini-2.0-flash-preview-image-generation': {e}", exc_info=True)
+            _flash_image_gen_model = None # Ensure it's None if init fails
+
+        if _flash_text_model or _flash_image_gen_model:
+             _logger.info("At least one Gemini model initialized successfully.")
         else:
-             _logger.error("Gemini model failed to initialize. AI features will be unavailable.")
+             _logger.error("All Gemini model initializations failed. AI features will be unavailable.")
+
 
     except Exception as e:
-        _logger.error(f"An unexpected error occurred during Gemini configuration: {e}", exc_info=True) # Log traceback
-        _flash_model = None # Ensure model is None if configuration fails
+        _logger.error(f"An unexpected error occurred during Gemini configuration: {e}", exc_info=True)
+        _flash_text_model = None
+        _flash_image_gen_model = None
 
 
 # Initialize Gemini when this cog file is imported
@@ -69,18 +81,19 @@ initialize_gemini()
 
 
 class AICog(commands.Cog):
-    """Cog for AI interaction features using on_message listener."""
+    """Cog for AI interaction features using on_message listener and slash commands."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Store the initialized model
-        self.flash_model = _flash_model
+        # Store the initialized models
+        self.flash_text_model = _flash_text_model # For mention & AI channel conversation/analysis
+        self.flash_image_gen_model = _flash_image_gen_model # For generate_image command
         _logger.info("AICog instance created.")
 
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Processes messages for AI interaction."""
+        """Processes messages for AI interaction in the designated channel or when mentioned."""
         # Ignore messages from bots
         if message.author.bot:
             return
@@ -89,287 +102,103 @@ class AICog(commands.Cog):
         if message.guild is None:
             return
 
-        # Ensure the AI model is initialized
-        if self.flash_model is None:
-             # _logger.debug(f"Skipping AI processing for message in guild {message.guild.id}: Gemini model not initialized.")
-             return # Silently ignore if model is missing
-
+        # Ensure at least the text model is initialized for on_message scenarios
+        if self.flash_text_model is None:
+             # _logger.debug(f"Skipping on_message AI processing in guild {message.guild.id}: Text model not initialized.")
+             return # Silently ignore if text model is missing
 
         # Get server configuration
         config = database.get_server_config(message.guild.id)
         ai_channel_id = config.get('ai_channel_id')
 
-        # --- Scenario 1: Bot is mentioned (@NamaBot) in ANY channel ---
-        # Check if the bot is mentioned and the message is NOT in the designated AI channel (if set)
-        # Also check if the mention is actually in the message content and is the bot's mention
         bot_user = self.bot.user
         is_mentioned = False
-        # Check if bot_user is not None and the mention string is actually in the message content
         if bot_user and bot_user.mention in message.content:
-             is_mentioned = True
+             is_mentioned = True # Simple check for mention presence
 
-        # Note: This logic might process messages like "Don't mention @NamaBot" if not careful.
-        # A more robust check might use message.mentions list and check if bot_user is in it
-        # and if the message starts with the mention, but for simplicity, this is usually sufficient.
-
-        if is_mentioned and (ai_channel_id is None or message.channel.id != ai_channel_id):
-             _logger.info(f"Processing bot mention message from {message.author.id} in guild {message.guild.name} ({message.guild.id}), channel {message.channel.name} ({message.channel.id}).")
-
-             # Indicate that the bot is typing
-             async with message.channel.typing():
-                 try:
-                     content_parts = []
-                     # Extract text content, removing the bot's mention
-                     # Use replace(..., 1) to replace only the first occurrence if at the start
-                     text_content = message.content.replace(bot_user.mention, '', 1).strip()
-
-                     # Check for attachments (images) in the mention message
-                     image_attachments = [att for att in message.attachments if 'image' in att.content_type]
-
-                     if image_attachments:
-                         # Limit number of images per prompt for mention responses too
-                         if len(image_attachments) > 2: # Maybe a smaller limit for quicker mention responses?
-                            await message.reply("Mohon berikan maksimal 2 gambar saat me-mention saya.")
-                            return
-
-                         for attachment in image_attachments:
-                             try:
-                                 image_bytes = await attachment.read()
-                                 pil_image = Image.open(io.BytesIO(image_bytes))
-                                 content_parts.append(pil_image)
-                                 _logger.info(f"Added image attachment {attachment.filename} for mention response.")
-                             except Exception as img_e:
-                                 _logger.error(f"Failed to process image attachment {attachment.filename} for mention: {img_e}", exc_info=True) # Log traceback
-                                 # Send warning and continue if other parts exist
-                                 try:
-                                     await message.channel.send(f"Peringatan: Tidak dapat memproses gambar '{attachment.filename}' untuk respons mention.")
-                                 except Exception as send_e:
-                                     _logger.error(f"Failed to send image processing warning in channel {message.channel.id}: {send_e}")
-
-                                 if len(image_attachments) == 1 and not text_content:
-                                      await message.reply("Tidak dapat memproses gambar yang Anda kirim bersama mention.")
-                                      return
-
-
-                     if text_content:
-                         content_parts.append(text_content)
-                         _logger.info("Added text content for mention response.")
-
-
-                     if not content_parts:
-                         # If only unsupported attachments or just the mention
-                         await message.reply("Halo! Ada yang bisa saya bantu? (Anda menyebut saya tapi tidak ada teks atau gambar yang bisa diproses).")
-                         return
-
-                     # Call the Flash model for the mention response (USE ASYNC METHOD)
-                     response = await self.flash_model.generate_content_async(content_parts)
-                     _logger.info(f"Received response from Gemini Flash for mention.")
-
-                     # Extract text response (ignoring potential image output for simple mention)
-                     response_text = ""
-                     if hasattr(response, 'candidates') and response.candidates:
-                         candidate = response.candidates[0]
-                         if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                            response_text = "".join(str(part.text) for part in candidate.content.parts if hasattr(part, 'text'))
-                         # Fallback checks if structure is different (less likely for text-only outputs)
-                         elif hasattr(candidate, 'text'):
-                             response_text = str(candidate.text)
-                     # Check top level text attribute as a final fallback
-                     elif hasattr(response, 'text'):
-                          response_text = str(response.text)
-
-
-                     if not response_text.strip():
-                         # Handle empty response or blocked prompt for mention
-                         if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason != genai_types.content.BlockReason.BLOCK_REASON_UNSPECIFIED:
-                              block_reason = response.prompt_feedback.block_reason.name
-                              _logger.warning(f"Mention prompt blocked by Gemini safety filter. Reason: {block_reason}.")
-                              await message.reply("Maaf, permintaan ini diblokir oleh filter keamanan AI.")
-                         else:
-                             _logger.warning("Gemini Flash returned an empty response for mention.")
-                             await message.reply("Maaf, saya tidak bisa memberikan respons saat ini.")
-                     else:
-                         # Send the one-off text response
-                         # Do NOT split response for mention - keep it concise if possible, or truncate
-                         if len(response_text) > 1500: # Shorter limit for one-off
-                             response_text = response_text[:1500] + "..." # Truncate long responses
-                             _logger.info(f"Truncated mention response to 1500 chars.")
-
-                         await message.reply(response_text)
-                         _logger.info("Mention response sent.")
-
-                 # --- Error Handling for Mention Scenario ---
-                 except genai_types.BlockedPromptException as e:
-                     _logger.warning(f"Mention prompt blocked by Gemini API: {e}")
-                     await message.reply("Maaf, permintaan ini melanggar kebijakan penggunaan AI.")
-                 except genai_types.StopCandidateException as e:
-                      _logger.warning(f"Gemini response stopped prematurely for mention: {e}")
-                      await message.reply("Maaf, respons AI terhenti.")
-                 # --- FIX: Changed genai.types.APIError to genai.APIError ---
-                 except genai.APIError as e:
-                     _logger.error(f"Gemini API Error during mention processing: {e}", exc_info=True) # Log traceback
-                     await message.reply(f"Terjadi error pada API AI: {e}")
-                 # --- END FIX ---
-                 except Exception as e:
-                     _logger.error(f"An unexpected error occurred during mention processing: {e}", exc_info=True) # Log traceback
-                     await message.reply(f"Terjadi error saat memproses permintaan AI: {e}")
-
-             return # Stop processing after handling the mention
-
-        # --- Scenario 2: Message is in the designated AI channel ---
-        # Check if this is the designated AI channel AND it's not a bot mention that was already handled
-        # The 'is_mentioned' check above ensures we don't double-process a mention in the AI channel.
+        # --- Scenario 1: Message is in the designated AI channel ---
         if ai_channel_id is not None and message.channel.id == ai_channel_id:
-            _logger.info(f"Processing AI channel message from {message.author.id} in guild {message.guild.name} ({message.guild.id}), channel {message.channel.name} ({message.channel.id}).")
+            # Check if it's just a bot mention in the AI channel - if so, let the mention scenario handle it below
+            if is_mentioned:
+                 _logger.debug(f"Message in AI channel {message.channel.id} is a bot mention. Letting mention scenario handle.")
+                 pass # Continue to the mention check below
+            else:
+                _logger.info(f"Processing AI channel message from {message.author.id} in guild {message.guild.name} ({message.guild.id}), channel {message.channel.name} ({message.channel.id}).")
 
-            # Indicate that the bot is typing
-            async with message.channel.typing():
-                try:
-                    content_parts = []
+                model = self.flash_text_model # Use the standard Flash model for conversation/analysis in AI channel
 
-                    # Check for attachments (images)
-                    image_attachments = [att for att in message.attachments if 'image' in att.content_type]
+                # Indicate that the bot is typing
+                async with message.channel.typing():
+                    try:
+                        content_parts = []
 
-                    if image_attachments:
-                         if len(image_attachments) > 4: # Limit number of images per prompt for AI channel
-                            await message.reply("Mohon berikan maksimal 4 gambar pada satu waktu untuk analisis.")
+                        # Process attachments (images) for analysis/multimodal input
+                        image_attachments = [att for att in message.attachments if 'image' in att.content_type]
+
+                        if image_attachments:
+                             if len(image_attachments) > 4: # Limit number of images for API
+                                await message.reply("Mohon berikan maksimal 4 gambar pada satu waktu untuk analisis/percakapan.")
+                                return
+
+                             for attachment in image_attachments:
+                                 try:
+                                     image_bytes = await attachment.read()
+                                     pil_image = Image.open(io.BytesIO(image_bytes))
+                                     # Append PIL Image object to content_parts for multimodal input
+                                     content_parts.append(pil_image)
+                                     _logger.info(f"Added image attachment {attachment.filename} to content parts for AI channel.")
+                                 except Exception as img_e:
+                                     _logger.error(f"Failed to process image attachment {attachment.filename} in AI channel: {img_e}", exc_info=True)
+                                     try:
+                                         await message.channel.send(f"Peringatan: Tidak dapat memproses gambar '{attachment.filename}': {img_e}")
+                                     except Exception as send_e:
+                                          _logger.error(f"Failed to send image processing warning in AI channel {message.channel.id}: {send_e}")
+
+                                     if len(image_attachments) == 1 and not message.content.strip():
+                                          await message.reply("Tidak dapat memproses gambar yang Anda kirim di channel AI.")
+                                          return
+
+
+                        # Add text content
+                        text_content = message.content.strip()
+                        if text_content:
+                            content_parts.append(text_content)
+                            _logger.info("Added text content to content parts for AI channel.")
+
+                        if not content_parts:
+                            _logger.debug("Message in AI channel had no processable content. Ignoring.")
                             return
 
-                         for attachment in image_attachments:
-                             try:
-                                 image_bytes = await attachment.read()
-                                 pil_image = Image.open(io.BytesIO(image_bytes))
-                                 content_parts.append(pil_image)
-                                 _logger.info(f"Added image attachment {attachment.filename} to content parts.")
-                             except Exception as img_e:
-                                 _logger.error(f"Failed to process image attachment {attachment.filename} in AI channel: {img_e}", exc_info=True) # Log traceback
-                                 try:
-                                     await message.channel.send(f"Peringatan: Tidak dapat memproses gambar '{attachment.filename}': {img_e}")
-                                 except Exception as send_e:
-                                      _logger.error(f"Failed to send image processing warning in AI channel {message.channel.id}: {send_e}")
+                        # Call the standard Flash model (ASYNC)
+                        # Note: This call is for conversation/analysis, NOT explicit image generation.
+                        response = await model.generate_content_async(content_parts)
+                        _logger.info(f"Received response from Gemini Flash for AI channel message.")
 
-                                 if len(image_attachments) == 1 and not message.content.strip():
-                                      await message.reply("Tidak dapat memproses gambar yang Anda kirim di channel AI.")
-                                      return
+                        # --- Parsing Text Response (expecting text from this model here) ---
+                        response_text = ""
+                        if hasattr(response, 'candidates') and response.candidates:
+                             candidate = response.candidates[0]
+                             if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                                 # Accumulate text parts
+                                 response_text = "".join(str(part.text) for part in candidate.content.parts if hasattr(part, 'text'))
+                             elif hasattr(candidate, 'text'):
+                                 response_text = str(candidate.text)
+                        elif hasattr(response, 'text'):
+                             response_text = str(response.text)
 
+                        # --- Send Text Response ---
+                        if not response_text.strip():
+                             if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason != genai_types.content.BlockReason.BLOCK_REASON_UNSPECIFIED:
+                                 block_reason = response.prompt_feedback.block_reason.name
+                                 _logger.warning(f"AI Channel prompt blocked by Gemini safety filter. Reason: {block_reason}. Full feedback: {response.prompt_feedback}")
+                                 await message.reply("Maaf, respons ini diblokir oleh filter keamanan AI.")
+                             else:
+                                _logger.warning(f"Gemini Flash returned an empty response in AI channel. Full response object: {response}")
+                                await message.reply("Maaf, saya tidak bisa memberikan respons saat ini.")
+                             return # Stop processing
 
-                    # Add text content if any
-                    text_content = message.content.strip()
-                    # Remove bot mention if it's at the start and was not handled by the mention scenario
-                    # (This might happen if someone @mentions the bot *at the start* of a message *in the AI channel*)
-                    # Although the mention scenario above *should* catch this first, this is a safety fallback.
-                    if bot_user and text_content.startswith(bot_user.mention):
-                         text_content = text_content.replace(bot_user.mention, '', 1).strip()
-
-
-                    if text_content:
-                        content_parts.append(text_content)
-                        _logger.info("Added text content to content parts.")
-
-
-                    # If message has no text and no valid image attachments, ignore
-                    if not content_parts:
-                        _logger.debug("Message in AI channel had no processable content (text or supported images). Ignoring.")
-                        return
-
-
-                    # Use the Flash model for ALL processing in the AI channel
-                    model = self.flash_model
-                    if model is None: # Double check just in case init failed
-                         await message.reply("Model AI tidak tersedia. Mohon hubungi administrator bot.")
-                         return
-                    _logger.info("Using Flash model for AI channel message.")
-
-
-                    # Call the Gemini API with the combined content (USE ASYNC METHOD)
-                    response = await model.generate_content_async(content_parts)
-                    _logger.info(f"Received response from Gemini API for AI channel message.")
-
-                    # --- Parsing the response ---
-                    # We will check for both text and potential image output.
-                    # Image output from Flash is uncertain, but we'll try to parse it if it exists.
-                    response_text = ""
-                    image_urls = []
-                    # Check for candidates and content parts first
-                    if hasattr(response, 'candidates') and response.candidates:
-                         candidate = response.candidates[0]
-                         # Check if candidate has a valid finish_reason indicating success
-                         # genai_types.StopCandidateException already handles 'STOP' reason with safety issues,
-                         # but there might be other reasons like 'MAX_TOKENS' etc.
-                         # For simplicity, let's proceed if there are content parts.
-                         if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                             for part in candidate.content.parts:
-                                  if hasattr(part, 'text'):
-                                       response_text += str(part.text) # Accumulate text parts
-                                  # Attempt to find image output parts - highly speculative for Flash
-                                  # These would typically be structured data, not just text links
-                                  elif hasattr(part, 'inline_data') and hasattr(part.inline_data, 'mime_type') and part.inline_data.mime_type.startswith('image/'):
-                                       _logger.warning("AI Channel: Received inline image data. Not currently supported for sending.")
-                                       # You would need to read part.inline_data.data (base64 string) and send it as a discord.File
-                                       image_urls.append("Inline image data received (cannot display directly yet).") # Indicate received data but cannot display
-                                  elif hasattr(part, 'file_data') and hasattr(part.file_data, 'file_uri'):
-                                       image_urls.append(part.file_data.file_uri)
-                                       _logger.info(f"AI Channel: Found file_uri in response: {part.file_data.file_uri}")
-                                  # Add other checks based on API docs if they exist for structured image output
-
-                    # Additionally, check accumulated response_text for markdown image links as a heuristic
-                    # (Models sometimes generate markdown links instead of structured image output)
-                    if response_text:
-                         markdown_image_pattern = r'!\[.*?\]\((https?://\S+\.(?:png|jpg|jpeg|gif|webp))\)'
-                         found_markdown_urls = re.findall(markdown_image_pattern, response_text)
-                         image_urls.extend(found_markdown_urls)
-                         if found_markdown_urls:
-                             _logger.info(f"AI Channel: Found markdown image URLs in text: {found_markdown_urls}")
-                             # Optionally, remove the markdown links from the text response if URLs are found
-                             # response_text = re.sub(markdown_image_pattern, '', response_text).strip()
-
-                    # --- Send Response ---
-                    if not response_text.strip() and not image_urls:
-                         # Handle empty response or blocked prompt
-                         if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason != genai_types.content.BlockReason.BLOCK_REASON_UNSPECIFIED:
-                             block_reason = response.prompt_feedback.block_reason.name
-                             # Log safety ratings if available: response.prompt_feedback.safety_ratings
-                             _logger.warning(f"AI Channel prompt blocked by Gemini safety filter. Reason: {block_reason}. Full feedback: {response.prompt_feedback}") # Added full feedback log
-                             await message.reply("Maaf, respons ini diblokir oleh filter keamanan AI.")
-                         else:
-                            _logger.warning(f"Gemini Flash returned an empty response in AI channel. Full response object: {response}") # Log full response object
-                            await message.reply("Maaf, saya tidak bisa memberikan respons saat ini.")
-                         return # Stop processing
-
-                    # Send image URLs first if any were found
-                    if image_urls:
-                        # Send each image URL in a separate message or combine? Separate is safer.
-                        for url in image_urls:
-                            # Can check if it's our placeholder text for inline data
-                            if url.startswith("Inline image data"):
-                                await message.reply(url) # Send the placeholder warning
-                            else:
-                                # Create an embed for the image URL for better display in Discord
-                                # Ensure the URL is valid format for embed image
-                                if url and (url.lower().endswith('.png') or url.lower().endswith('.jpg') or url.lower().endswith('.jpeg') or url.lower().endswith('.gif') or url.lower().endswith('.webp')):
-                                     image_embed = discord.Embed(color=discord.Color.blue())
-                                     image_embed.set_image(url=url)
-                                     # Truncate prompt text for footer if too long
-                                     prompt_text_footer = text_content[:100] + ('...' if len(text_content) > 100 else '') if text_content else "Gambar dihasilkan"
-                                     image_embed.set_footer(text=f"Dihasilkan untuk \"{prompt_text_footer}\"")
-                                     try:
-                                          await message.reply(embed=image_embed)
-                                          _logger.info(f"Sent image embed for URL: {url}")
-                                     except Exception as embed_e:
-                                          _logger.error(f"Failed to send image embed for URL {url}: {embed_e}", exc_info=True) # Log traceback
-                                          # Fallback to just sending the URL as text if embed fails
-                                          await message.reply(f"URL Gambar yang Dihasilkan: {url}")
-                                else:
-                                     # If URL format is unexpected for image embed
-                                     _logger.warning(f"Skipping image embed for potential non-image URL: {url}")
-                                     await message.reply(f"URL yang Ditemukan (mungkin bukan gambar): {url}")
-
-                            await asyncio.sleep(0.5) # Small delay
-
-                    # Send text response if any
-                    if response_text.strip():
-                        # --- FIX: Changed chunk size from 2000 to 1990 ---
-                        if len(response_text) > 1990: # Use 1990 to leave space for the header
+                        # Use chunk size 1990 to leave space for the header
+                        if len(response_text) > 1990:
                             _logger.info("AI Channel: Splitting long text response into multiple messages (chunk size 1990).")
                             chunks = [response_text[i:i+1990] for i in range(0, len(response_text), 1990)]
                             for i, chunk in enumerate(chunks):
@@ -378,53 +207,336 @@ class AICog(commands.Cog):
                                      await message.reply(header + chunk)
                                      _logger.debug(f"Sent chunk {i+1}/{len(chunks)}.")
                                 except discord.errors.HTTPException as http_e:
-                                     _logger.error(f"HTTPException when sending chunk {i+1}/{len(chunks)}: {http_e}", exc_info=True) # Log traceback
-                                     # Attempt to send an error message for the failed chunk
+                                     _logger.error(f"HTTPException when sending chunk {i+1}/{len(chunks)}: {http_e}", exc_info=True)
                                      try:
                                          await message.channel.send(f"Gagal mengirim bagian {i+1} respons karena error: {http_e}")
                                      except Exception as send_e:
                                          _logger.error(f"Failed to send error message for failed chunk: {send_e}")
                                 except Exception as send_e:
-                                     _logger.error(f"An unexpected error occurred when sending chunk {i+1}/{len(chunks)}: {send_e}", exc_info=True) # Log traceback
+                                     _logger.error(f"An unexpected error occurred when sending chunk {i+1}/{len(chunks)}: {send_e}", exc_info=True)
                                      try:
                                          await message.channel.send(f"Gagal mengirim bagian {i+1} respons karena error tak terduga: {send_e}")
                                      except Exception as send_e_again:
                                           _logger.error(f"Failed to send unexpected error message for failed chunk: {send_e_again}")
 
-                                await asyncio.sleep(0.5) # Small delay
-                        # --- END FIX ---
+                                await asyncio.sleep(0.5)
                         else:
-                            # Send the whole text response if it fits within 1990 (or slightly more if no header is needed)
-                            # Let's be safe and use 2000 for the final message length check
-                            if len(response_text) <= 2000:
+                            # Send the whole text response if it fits
+                            if len(response_text) <= 2000: # Final safety check against Discord limit
                                 await message.reply(response_text)
                                 _logger.info("AI Channel text response sent (single message).")
-                            else: # Should not happen with chunking logic, but as a fallback
-                                _logger.error(f"AI Channel response text length ({len(response_text)}) > 2000 but somehow didn't trigger chunking logic.")
-                                # Fallback to simple send, will likely fail again
+                            else: # Should not happen with 1990 chunking, but as a fallback
+                                _logger.error(f"AI Channel response text length ({len(response_text)}) > 2000 but didn't trigger 1990 chunking.")
                                 try:
-                                     await message.reply(response_text[:1990] + "...") # Send truncated message
+                                     await message.reply(response_text[:1990] + "...") # Send truncated fallback message
                                 except Exception as e:
                                      _logger.error(f"Failed to send truncated fallback message: {e}")
                                      await message.reply("Gagal mengirim respons panjang.")
 
 
-                # --- Error Handling for AI Channel Scenario ---
-                except genai_types.BlockedPromptException as e:
-                    _logger.warning(f"AI Channel prompt blocked by Gemini API: {e}")
-                    await message.reply("Maaf, permintaan ini melanggar kebijakan penggunaan AI dan tidak bisa diproses.")
-                except genai_types.StopCandidateException as e:
-                     _logger.warning(f"Gemini response stopped prematurely in AI channel: {e}")
-                     await message.reply("Maaf, respons AI terhenti di tengah jalan.")
-                except genai.APIError as e: # This catches API errors from the generate_content_async call
-                    _logger.error(f"Gemini API Error during AI channel processing: {e}", exc_info=True) # Log traceback
-                    await message.reply(f"Terjadi error pada API AI: {e}")
-                except Exception as e: # Catch any other unexpected errors during processing *before* sending
-                    _logger.error(f"An unexpected error occurred during AI processing (AI channel): {e}", exc_info=True) # Log traceback
-                    await message.reply(f"Terjadi error tak terduga saat memproses permintaan AI: {e}")
+                    # --- Error Handling for AI Channel Scenario (on_message) ---
+                    except genai_types.BlockedPromptException as e:
+                        _logger.warning(f"AI Channel prompt blocked by Gemini API: {e}")
+                        await message.reply("Maaf, permintaan ini melanggar kebijakan penggunaan AI dan tidak bisa diproses.")
+                    except genai_types.StopCandidateException as e:
+                         _logger.warning(f"Gemini response stopped prematurely in AI channel: {e}")
+                         await message.reply("Maaf, respons AI terhenti di tengah jalan.")
+                    except genai.APIError as e: # Catches API errors from generate_content_async
+                        _logger.error(f"Gemini API Error during AI channel processing (on_message): {e}", exc_info=True)
+                        await message.reply(f"Terjadi error pada API AI: {e}")
+                    except Exception as e: # Catch any other unexpected errors during processing *before* sending
+                        _logger.error(f"An unexpected error occurred during AI processing (AI channel on_message): {e}", exc_info=True)
+                        await message.reply(f"Terjadi error tak terduga saat memproses permintaan AI: {e}")
+
+                return # Stop processing after handling the AI channel message
+
+        # --- Scenario 2: Bot is mentioned (@NamaBot) in ANY channel (outside AI channel) ---
+        # Check if the bot is mentioned and the message is NOT in the designated AI channel (or AI channel is not set)
+        # This check happens AFTER the AI channel check. If it's a mention *in* the AI channel,
+        # the AI channel scenario above processes it first if the message is not just a mention.
+        # If it's *only* a mention in the AI channel, it might fall through here, but the content_parts
+        # would be empty if no text/images are with the mention.
+        # Let's adjust this logic slightly: if message *starts* with mention OR is only mention, handle as mention scenario,
+        # UNLESS it's the designated AI channel and has other content (handled above).
+
+        # More robust check for mention-only or starts-with-mention outside AI channel
+        is_mention_only = bot_user and message.content.strip() == bot_user.mention
+        starts_with_mention = bot_user and message.content.strip().startswith(bot_user.mention)
+
+        if (is_mention_only or (starts_with_mention and not (ai_channel_id is not None and message.channel.id == ai_channel_id))) and self.flash_text_model:
+             # If it's a mention-only message OR starts with a mention AND is NOT in the AI channel (or AI channel not set)
+             # And the text model is available
+             _logger.info(f"Processing bot mention message from {message.author.id} in guild {message.guild.name} ({message.guild.id}), channel {message.channel.name} ({message.channel.id}). (Mention Scenario)")
+
+             # Indicate that the bot is typing
+             async with message.channel.typing():
+                 try:
+                     content_parts = []
+                     # Extract text content, removing the bot's mention
+                     text_content = message.content.replace(bot_user.mention, '', 1).strip()
+
+                     # For mention response (one-off text only), we only use text input
+                     # Images attached to mention messages will be ignored for API input in this scenario.
+                     if text_content:
+                         content_parts.append(text_content)
+                         _logger.info("Added text content for mention response.")
+
+                     if not content_parts:
+                         await message.reply("Halo! Ada yang bisa saya bantu? (Anda menyebut saya tapi tidak ada teks yang bisa diproses).")
+                         return
+
+                     # Call the standard Flash model for the mention response (ASYNC)
+                     response = await self.flash_text_model.generate_content_async(content_parts)
+                     _logger.info(f"Received response from Gemini Flash for mention.")
+
+                     # Extract text response (only expect text from this model/scenario)
+                     response_text = ""
+                     if hasattr(response, 'candidates') and response.candidates:
+                         candidate = response.candidates[0]
+                         if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                            response_text = "".join(str(part.text) for part in candidate.content.parts if hasattr(part, 'text'))
+                         elif hasattr(candidate, 'text'):
+                             response_text = str(candidate.text)
+                     elif hasattr(response, 'text'):
+                          response_text = str(response.text)
+
+
+                     if not response_text.strip():
+                         if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason != genai_types.content.BlockReason.BLOCK_REASON_UNSPECIFIED:
+                              block_reason = response.prompt_feedback.block_reason.name
+                              _logger.warning(f"Mention prompt blocked by Gemini safety filter. Reason: {block_reason}. Full feedback: {response.prompt_feedback}")
+                              await message.reply("Maaf, permintaan ini diblokir oleh filter keamanan AI.")
+                         else:
+                             _logger.warning(f"Gemini Flash returned an empty response for mention. Full response object: {response}")
+                             await message.reply("Maaf, saya tidak bisa memberikan respons saat ini.")
+                     else:
+                         if len(response_text) > 1500: # Shorter limit for one-off
+                             response_text = response_text[:1500] + "..." # Truncate long responses
+                             _logger.info(f"Truncated mention response to 1500 chars.")
+
+                         await message.reply(response_text)
+                         _logger.info("Mention response sent.")
+
+                 except genai_types.BlockedPromptException as e:
+                     _logger.warning(f"Mention prompt blocked by Gemini API: {e}")
+                     await message.reply("Maaf, permintaan ini melanggar kebijakan penggunaan AI.")
+                 except genai_types.StopCandidateException as e:
+                      _logger.warning(f"Gemini response stopped prematurely for mention: {e}")
+                      await message.reply("Maaf, respons AI terhenti.")
+                 except genai.APIError as e:
+                     _logger.error(f"Gemini API Error during mention processing: {e}", exc_info=True)
+                     await message.reply(f"Terjadi error pada API AI: {e}")
+                 except Exception as e:
+                     _logger.error(f"An unexpected error occurred during mention processing: {e}", exc_info=True)
+                     await message.reply(f"Terjadi error saat memproses permintaan AI: {e}")
+
+             return # Stop processing after handling the mention
 
         # If not in AI channel and not a bot mention, just ignore the message.
         # No 'else' block needed, function simply ends.
+
+
+    # --- Image Generation Command ---
+    @app_commands.command(name='generate_image', description='Generates an image based on a text prompt using AI.')
+    @app_commands.describe(prompt='Describe the image you want to generate.')
+    @app_commands.guild_only() # Ensure command is in guild
+    async def generate_image_slash(self, interaction: discord.Interaction, prompt: str):
+        """Generates an image based on a text prompt using the image generation model."""
+        _logger.info(f"Received /generate_image command from {interaction.user.id} with prompt: '{prompt}' in guild {interaction.guild.id}.")
+
+        # Check if the command is used in the designated AI channel for this server
+        config = database.get_server_config(interaction.guild_id)
+        ai_channel_id = config.get('ai_channel_id')
+
+        # We check interaction.channel_id specifically, as interaction.channel is a TextChannel object
+        if ai_channel_id is None or interaction.channel_id != ai_channel_id:
+             # Get the channel object to mention it if possible
+             ai_channel = self.bot.get_channel(ai_channel_id) if ai_channel_id else None
+             channel_mention = ai_channel.mention if ai_channel else '`/config ai_channel` untuk mengaturnya'
+
+             await interaction.response.send_message(
+                 f"Command ini hanya bisa digunakan di channel AI yang sudah ditentukan. Silakan gunakan {channel_mention}.",
+                 ephemeral=True
+             )
+             _logger.warning(f"/generate_image used outside AI channel {ai_channel_id} by user {interaction.user.id} in channel {interaction.channel_id}.")
+             return
+
+        # Ensure the image generation model is available
+        model = self.flash_image_gen_model
+        if model is None:
+             _logger.warning(f"Skipping generate_image in guild {interaction.guild.id}: Image generation model not initialized.")
+             await interaction.response.send_message("Layanan AI untuk generate gambar tidak tersedia. Mohon hubungi administrator bot.", ephemeral=True)
+             return
+
+        if not prompt.strip():
+             await interaction.response.send_message("Mohon berikan deskripsi untuk gambar yang ingin Anda buat.", ephemeral=True)
+             return
+
+
+        await interaction.response.defer(ephemeral=False) # Defer the response, visible to everyone
+
+        try:
+            _logger.info(f"Calling image generation model for prompt: '{prompt}'.")
+            # Call the image generation model with required config (ASYNC)
+            response = await model.generate_content_async(
+                 prompt, # Input is just the text prompt for generation
+                 generation_config=genai_types.GenerateContentConfig(
+                     response_modalities=['TEXT', 'IMAGE'] # Request both text and image output
+                 )
+            )
+            _logger.info(f"Received response from Gemini API for image generation.")
+
+            # --- Parsing the response for both text and image ---
+            response_text = "" # Accompanying text
+            image_urls = [] # Collect image URLs if returned
+            image_data_parts = [] # Collect inline image data parts if returned
+
+            if hasattr(response, 'candidates') and response.candidates:
+                 candidate = response.candidates[0]
+                 if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                     for part in candidate.content.parts:
+                          if hasattr(part, 'text'):
+                               response_text += str(part.text) # Accumulate text parts
+                          # Check for structured image output
+                          elif hasattr(part, 'inline_data') and hasattr(part.inline_data, 'mime_type') and part.inline_data.mime_type.startswith('image/'):
+                               _logger.info("Generate Image: Received inline image data in response.")
+                               image_data_parts.append(part) # Store the part to process later
+                          elif hasattr(part, 'file_data') and hasattr(part.file_data, 'file_uri'):
+                               # API returned a file URI
+                               image_urls.append(part.file_data.file_uri)
+                               _logger.info(f"Generate Image: Found file_uri in response: {part.file_data.file_uri}")
+
+            # --- Send Response ---
+            if not response_text.strip() and not image_urls and not image_data_parts:
+                 # Handle empty response or blocked prompt
+                 if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason != genai_types.content.BlockReason.BLOCK_REASON_UNSPECIFIED:
+                     block_reason = response.prompt_feedback.block_reason.name
+                     _logger.warning(f"Generate Image prompt blocked by Gemini safety filter. Reason: {block_reason}. Full feedback: {response.prompt_feedback}")
+                     await interaction.followup.send("Maaf, permintaan generate gambar ini diblokir oleh filter keamanan AI.")
+                 else:
+                    _logger.warning(f"Image generation model returned an empty response. Full response object: {response}")
+                    await interaction.followup.send("Gagal menghasilkan gambar. AI memberikan respons yang tidak terduga atau kosong.")
+                 return # Stop processing
+
+            # Send image outputs first
+            if image_urls:
+                 _logger.info(f"Generate Image: Sending {len(image_urls)} image URLs.")
+                 for url in image_urls:
+                     if url and (url.lower().endswith('.png') or url.lower().endswith('.jpg') or url.lower().endswith('.jpeg') or url.lower().endswith('.gif') or url.lower().endswith('.webp')):
+                          image_embed = discord.Embed(color=discord.Color.blue())
+                          image_embed.set_image(url=url)
+                          prompt_text_footer = prompt[:100] + ('...' if len(prompt) > 100 else '')
+                          image_embed.set_footer(text=f"Dihasilkan untuk \"{prompt_text_footer}\"")
+                          try:
+                               await interaction.followup.send(embed=image_embed)
+                               _logger.info(f"Sent image embed for URL: {url}")
+                          except Exception as embed_e:
+                               _logger.error(f"Failed to send image embed for URL {url}: {embed_e}", exc_info=True)
+                               await interaction.followup.send(f"URL Gambar yang Dihasilkan: {url}") # Fallback
+                     else:
+                          _logger.warning(f"Skipping image embed for potential non-image URL: {url}")
+                          await interaction.followup.send(f"URL yang Ditemukan (mungkin bukan gambar): {url}")
+                     await asyncio.sleep(0.5) # Small delay
+
+            # Handle inline image data parts (requires sending as discord.File)
+            if image_data_parts:
+                 _logger.warning(f"Generate Image: Found {len(image_data_parts)} inline image data parts. Attempting to send as files.")
+                 await interaction.followup.send("Mendeteksi data gambar inline dalam respons. Mencoba mengirim sebagai file...")
+                 for i, part in enumerate(image_data_parts):
+                      try:
+                           image_bytes = base64.b64decode(part.inline_data.data)
+                           mime_type = part.inline_data.mime_type
+                           extension = mime_type.split('/')[-1] if '/' in mime_type else 'png'
+                           file_name = f"generated_image_{i+1}.{extension}"
+                           discord_file = discord.File(io.BytesIO(image_bytes), filename=file_name)
+                           await interaction.followup.send(f"Gambar #{i+1}:", file=discord_file)
+                           _logger.info(f"Successfully sent inline image data as file {file_name}.")
+                      except Exception as file_e:
+                           _logger.error(f"Failed to send inline image data part {i+1} as file: {file_e}", exc_info=True)
+                           try:
+                               await interaction.followup.send(f"Gagal mengirim gambar inline #{i+1}.")
+                           except Exception as send_e:
+                                _logger.error(f"Failed to send error message for failed inline image file: {send_e}")
+                      await asyncio.sleep(0.5)
+
+
+            # Send accompanying text response if any (after images)
+            if response_text.strip():
+                 # For slash command response, we can just send the text directly
+                 # No need for chunking if sent via followup, Discord handles it better.
+                 # But check if the total response (including images) exceeds limits or if text alone is huge.
+                 # For safety, let's still chunk if the text alone is very long.
+                 if len(response_text) > 1990: # Use 1990 to be safe if combined with other things later
+                      _logger.info("Generate Image: Splitting accompanying text response into multiple messages (chunk size 1990).")
+                      chunks = [response_text[i:i+1990] for i in range(0, len(response_text), 1990)]
+                      for i, chunk in enumerate(chunks):
+                           header = f"(Teks Bagian {i+1}/{len(chunks)}):\n" if len(chunks) > 1 else "" # Differentiate from image parts
+                           try:
+                               await interaction.followup.send(header + chunk)
+                               _logger.debug(f"Sent accompanying text chunk {i+1}/{len(chunks)}.")
+                           except Exception as send_e:
+                                _logger.error(f"Failed to send accompanying text chunk {i+1}/{len(chunks)}: {send_e}", exc_info=True)
+                                try:
+                                     await interaction.channel.send(f"Gagal mengirim bagian teks pendamping {i+1} karena error: {send_e}") # Send in channel as followup might be limited
+                                except Exception as send_e_again:
+                                     _logger.error(f"Failed to send error message for failed accompanying text chunk: {send_e_again}")
+
+                           await asyncio.sleep(0.5)
+                 else:
+                      await interaction.followup.send(response_text)
+                      _logger.info("Generate Image: Accompanying text response sent (single message).")
+
+
+            # If no image or text was generated but no block reason
+            if not image_urls and not image_data_parts and not response_text.strip():
+                 _logger.warning(f"Image generation command returned empty response with no block reason. Full response object: {response}")
+                 await interaction.followup.send("Gagal menghasilkan gambar. AI memberikan respons kosong.")
+
+
+        # --- Error Handling for generate_image command ---
+        except genai_types.BlockedPromptException as e:
+             _logger.warning(f"Generate Image prompt blocked by Gemini API: {e}")
+             await interaction.followup.send("Maaf, permintaan generate gambar ini melanggar kebijakan penggunaan AI dan tidak bisa diproses.")
+        except genai_types.StopCandidateException as e:
+             _logger.warning(f"Gemini response stopped prematurely during image generation: {e}")
+             await interaction.followup.send("Maaf, proses generate gambar terhenti di tengah jalan.")
+        except genai.APIError as e:
+            _logger.error(f"Gemini API Error during generate_image: {e}", exc_info=True)
+            await interaction.followup.send(f"Terjadi error pada API AI saat generate gambar: {e}")
+        except Exception as e:
+            _logger.error(f"An unexpected error occurred during image generation: {e}", exc_info=True)
+            await interaction.followup.send(f"Terjadi error tak terduga saat mencoba generate gambar: {e}")
+
+
+    # --- Shared Error Handler for AI Cog Slash Commands ---
+    # This handler catches errors specifically for slash commands defined in THIS cog (e.g., /generate_image).
+    async def ai_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        """Error handler for AI slash commands."""
+        # Ensure we can send a message even if interaction response is done
+        # For slash commands, followup is preferred after defer.
+        send_func = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
+
+        if isinstance(error, app_commands.CheckFailure): # Catches app_commands.guild_only or custom checks
+             _logger.warning(f"AI command check failed for user {interaction.user.id} on command {interaction.command.name}: {error}")
+             # The custom check for AI channel already sends a message, so avoid sending again here.
+             # If it's a guild_only check failure, send a generic message.
+             if "Command ini hanya bisa digunakan di server" in str(error): # Check if it's likely from guild_only()
+                 await send_func("Command ini hanya bisa digunakan di server.", ephemeral=True)
+             elif "channel AI yang sudah ditentukan" in str(error): # Check if it's from our custom channel check message
+                  # Message already sent by the check itself
+                  pass
+             else: # Other custom check failures
+                  await send_func(str(error), ephemeral=True)
+
+        elif isinstance(error, app_commands.CommandInvokeError):
+             _logger.error(f"CommandInvokeError in AI command {interaction.command.name}: {error.original}", exc_info=error.original)
+             await send_func(f"Terjadi error saat mengeksekusi command AI: {error.original}", ephemeral=True)
+        elif isinstance(error, app_commands.TransformerError):
+             _logger.warning(f"TransformerError in AI command {interaction.command.name}: {error.original}")
+             await send_func(f"Nilai tidak valid diberikan untuk argumen '{error.param_name}': {error.original}", ephemeral=True)
+        else:
+            _logger.error(f"An unexpected error occurred in AI command {interaction.command.name}: {error}", exc_info=True)
+            await send_func(f"Terjadi error tak terduga: {error}", ephemeral=True)
 
 
 # --- Setup function ---
@@ -435,15 +547,18 @@ async def setup(bot: commands.Bot):
         _logger.error("GOOGLE_API_KEY environment variable not found. AICog will not be loaded.")
         return # Do not load the cog if the API key is missing
 
-    # Initialize Gemini model
+    # Initialize Gemini models
     initialize_gemini()
 
-    # Check if the model was initialized successfully before adding the cog
-    if _flash_model is None:
-         _logger.error("Gemini model failed to initialize. AICog will not be loaded.")
-         return # Do not load the cog if the model is unavailable
+    # Check if at least one model was initialized successfully
+    # Load the cog if *either* is available, checks inside on_message/commands will handle disabled features.
+    if _flash_text_model is None and _flash_image_gen_model is None:
+         _logger.error("All Gemini models failed to initialize. AICog will not be loaded.")
+         return # Do not load the cog if no models are available
 
-    await bot.add_cog(AICog(bot))
+    cog_instance = AICog(bot)
+    await bot.add_cog(cog_instance)
     _logger.info("AICog loaded.")
 
-    # No slash commands in this cog, so no slash command error handlers to attach
+    # Attach error handlers to the slash commands defined in THIS cog
+    cog_instance.generate_image_slash.error(cog_instance.ai_command_error)

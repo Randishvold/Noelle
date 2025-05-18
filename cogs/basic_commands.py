@@ -873,7 +873,7 @@ class BasicCommandsCog(commands.Cog):
              _logger.warning(f"CheckFailure error for user {interaction.user.id} on command {interaction.command.name}: {error}")
              await send_func(str(error), ephemeral=True) # Send the custom message from CheckFailure
         elif isinstance(error, app_commands.CommandInvokeError):
-             _logger.error(f"CommandInvokeError in basic command {interaction.command.name}: {error.original}")
+             _logger.error(f"CommandInvokeError in basic command {interaction.command.name}: {error.original}", exc_info=error.original)
              # Log the traceback for CommandInvokeError's original exception
              _logger.exception("Original exception for CommandInvokeError:", exc_info=error.original)
              await send_func(f"Terjadi error saat mengeksekusi perintah: {error.original}", ephemeral=True)
@@ -881,7 +881,7 @@ class BasicCommandsCog(commands.Cog):
              _logger.warning(f"TransformerError in basic command {interaction.command.name}: {error.original}")
              await send_func(f"Nilai tidak valid diberikan untuk argumen '{error.param_name}': {error.original}", ephemeral=True)
         else:
-            _logger.error(f"An unexpected error occurred in basic command {interaction.command.name}: {error}")
+            _logger.error(f"An unexpected error occurred in basic command {interaction.command.name}: {error}", exc_info=True)
             await send_func(f"Terjadi error tak terduga: {error}", ephemeral=True)
 
 
@@ -900,7 +900,7 @@ async def setup(bot: commands.Bot):
     cog_instance.variables_slash.error(cog_instance.basic_command_error)
     cog_instance.pengumuman_slash.error(cog_instance.basic_command_error)
     cog_instance.kick_slash.error(cog_instance.basic_command_error)
-    cog_instance.ban_slash.error(cog_instance.basic_command_error)
+    cog_instance.ban_slash.error(cog_command_error) # FIX: Changed to cog_instance.basic_command_error
     cog_instance.serverinfo_slash.error(cog_instance.basic_command_error)
     cog_instance.userinfo_slash.error(cog_instance.basic_command_error)
     cog_instance.addrole_slash.error(cog_instance.basic_command_error)
