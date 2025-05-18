@@ -80,7 +80,7 @@ def delete_custom_embed(guild_id: int, embed_name: str):
 def create_processed_embed(embed_data: dict, user: discord.User = None, member: discord.Member = None, guild: discord.Guild = None, channel: discord.TextChannel = None):
     """Creates a discord.Embed object from stored data after processing variables."""
     if not embed_data:
-        return discord.Embed(title="Empty Embed", description="This embed has no content yet.", color=discord.Color.gray())
+        return discord.Embed(title="Empty Embed", description="This embed has no content yet.", color=discord.Color.light_gray())
 
     # Make a copy to avoid modifying the stored data
     processed_data = embed_data.copy()
