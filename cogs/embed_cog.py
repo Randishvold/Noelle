@@ -1,88 +1,27 @@
 import discord
 import os
-import sqlite3
+# Remove sqlite3 import
+# import sqlite3
 import json
-import datetime # Import datetime explicitly here as we use datetime objects
+import datetime
 from discord.ext import commands
 from discord import app_commands
 import discord.ui as ui
-import utils # Import utils from the project root
+import utils
+# --- Import database functions ---
+import database # Import the database module
 
-# --- Database Setup ---
-DB_PATH = os.path.join('data', 'embeds.db')
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+# --- Database Setup (Removed from here) ---
+# DB_PATH, os.makedirs, init_db functions are removed.
+# Database connection and index creation are handled in database.py
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS custom_embeds (
-            guild_id INTEGER NOT NULL,
-            embed_name TEXT NOT NULL,
-            embed_data TEXT NOT NULL,
-            PRIMARY KEY (guild_id, embed_name)
-        )
-    ''')
-    conn.commit()
-    conn.close()
+# --- Database Helper Functions (Removed from here) ---
+# save_custom_embed, get_custom_embed, get_all_custom_embed_names, delete_custom_embed
+# These functions are now in database.py and will be called via database.function_name
 
-init_db()
-
-# --- Database Helper Functions ---
-# (save_custom_embed, get_custom_embed, get_all_custom_embed_names, delete_custom_embed remain the same)
-
-def save_custom_embed(guild_id: int, embed_name: str, embed_data: dict):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    # Ensure timestamp is stored as boolean True/False, not datetime object string
-    # The default=str in json.dumps is okay if there are other datetime objects,
-    # but for the footer timestamp, we should store True/False.
-    # Let's ensure the data dictionary being passed here has timestamp as bool
-    # (This is handled in FooterEmbedModal's on_submit)
-    cursor.execute('''
-        INSERT OR REPLACE INTO custom_embeds (guild_id, embed_name, embed_data)
-        VALUES (?, ?, ?)
-    ''', (guild_id, embed_name, json.dumps(embed_data)))
-    conn.commit()
-    conn.close()
-
-def get_custom_embed(guild_id: int, embed_name: str):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT embed_data FROM custom_embeds
-        WHERE guild_id = ? AND embed_name = ?
-    ''', (guild_id, embed_name))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return json.loads(row[0])
-    return None
-
-def get_all_custom_embed_names(guild_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT embed_name FROM custom_embeds
-        WHERE guild_id = ?
-    ''', (guild_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
-
-def delete_custom_embed(guild_id: int, embed_name: str):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        DELETE FROM custom_embeds
-        WHERE guild_id = ? AND embed_name = ?
-    ''', (guild_id, embed_name))
-    changes = cursor.rowcount
-    conn.commit()
-    conn.close()
-    return changes > 0
 
 # --- Helper function to create embed object from data with variable processing ---
+# (This function remains largely the same, it uses utils)
 def create_processed_embed(embed_data: dict, user: discord.User = None, member: discord.Member = None, guild: discord.Guild = None, channel: discord.TextChannel = None):
     """Creates a discord.Embed object from stored data after processing variables."""
     if not embed_data:
@@ -96,6 +35,7 @@ def create_processed_embed(embed_data: dict, user: discord.User = None, member: 
              processed_data['author']['name'] = utils.replace_variables(processed_data['author']['name'], user=user, member=member, guild=guild, channel=channel)
         if 'icon_url' in processed_data['author'] and processed_data['author']['icon_url']:
              processed_data['author']['icon_url'] = utils.replace_variables(processed_data['author']['icon_url'], user=user, member=member, guild=guild, channel=channel)
+
 
     # Process Variables in Footer
     if 'footer' in processed_data and isinstance(processed_data['footer'], dict):
@@ -125,42 +65,44 @@ def create_processed_embed(embed_data: dict, user: discord.User = None, member: 
         processed_data['fields'] = processed_fields
 
     # --- Handle timestamp for Embed.from_dict ---
-    # Check if the *stored* data indicated timestamp should be added
+    # Check if the *stored* data indicated timestamp should be added (boolean True/False in footer)
     should_add_timestamp = processed_data.get('footer', {}).get('timestamp') is True
 
-    # Remove the boolean 'timestamp' key from the footer dict before creating the embed
-    # This prevents discord.Embed.from_dict from trying to interpret the boolean as part of footer data
+    # Remove the boolean 'timestamp' key from the footer dict in processed_data
+    # to avoid discord.Embed.from_dict trying to interpret the boolean as part of footer data.
+    # This key is for *our internal logic* (should we add the timestamp?), not Discord's footer structure.
     # Make a copy of footer dict if it exists to avoid modifying processed_data directly
-    processed_footer = processed_data.get('footer', {}).copy()
+    processed_footer = processed_data.get('footer', {}).copy() # Copy the footer dict
     if 'timestamp' in processed_footer:
-         del processed_footer['timestamp']
+         del processed_footer['timestamp'] # Remove the boolean timestamp flag
 
-    # Update processed_data with the cleaned footer (if footer exists)
-    if 'footer' in processed_data:
+    # Update processed_data with the cleaned footer (if footer exists in original data)
+    if 'footer' in processed_data: # Only update if original data had a 'footer' key
          processed_data['footer'] = processed_footer
 
     # Now, add the actual datetime object (or its string) to the *top level* of processed_data
     # ONLY if should_add_timestamp is True.
-    # Let's add the ISO format string for compatibility with from_dict as documented.
+    # discord.Embed.from_dict expects an ISO 8601 formatted string for the top-level 'timestamp' key.
     if should_add_timestamp:
-        processed_data['timestamp'] = datetime.datetime.now(datetime.timezone.utc).isoformat() # <-- FIX: Add as ISO string
+        processed_data['timestamp'] = datetime.datetime.now(datetime.timezone.utc).isoformat() # Add as ISO string
+
+    # The color in stored data is an integer. discord.Embed.from_dict handles this automatically.
 
 
     try:
         # Create a discord.Embed object from the processed dictionary data
         # This dictionary now has a top-level 'timestamp' key with an ISO string if enabled
+        # The footer dict within processed_data no longer has the boolean 'timestamp' flag
         embed = discord.Embed.from_dict(processed_data)
         return embed
     except Exception as e:
         print(f"Error creating embed object from processed data: {e}")
         print(f"Problematic embed data: {processed_data}")
-        # Ensure this fallback also uses a valid color
         return discord.Embed(title="Embed Creation Error", description=f"Could not create embed: {e}", color=discord.Color.red())
 
 
 # --- Separate Modal Classes ---
 
-# Basic Embed Modal (remains the same)
 class BasicEmbedModal(ui.Modal, title='Edit Basic Embed Info'):
     embed_title = ui.TextInput(label='Title', style=discord.TextStyle.short, required=False, max_length=256)
     embed_description = ui.TextInput(label='Description', style=discord.TextStyle.long, required=False)
@@ -170,21 +112,26 @@ class BasicEmbedModal(ui.Modal, title='Edit Basic Embed Info'):
         super().__init__()
         self.embed_name = embed_name
         self.guild_id = guild_id
-        if initial_data:
-            self.embed_title.default = initial_data.get('title', '')
-            self.embed_description.default = initial_data.get('description', '')
-            color_int = initial_data.get('color')
-            if color_int is not None:
-                 self.embed_color.default = utils.get_color_hex(color_int)
+        self.initial_data = initial_data or {} # Store initial data
+
+        self.embed_title.default = self.initial_data.get('title', '')
+        self.embed_description.default = self.initial_data.get('description', '')
+        color_int = self.initial_data.get('color')
+        if color_int is not None:
+             self.embed_color.default = utils.get_color_hex(color_int)
 
     async def on_submit(self, interaction: discord.Interaction):
-        current_data = get_custom_embed(self.guild_id, self.embed_name) or {}
+        # Retrieve the *latest* data from DB to avoid overwriting other changes
+        # Use the get_custom_embed from database.py
+        current_data = database.get_custom_embed(self.guild_id, self.embed_name) or {}
 
+        # Get data from modal inputs
         title = self.embed_title.value.strip() or None
         description = self.embed_description.value.strip() or None
         color_str = self.embed_color.value.strip()
         color = utils.get_color_int(color_str) if color_str else None
 
+        # Update current data
         if title is not None:
              current_data['title'] = title
         elif 'title' in current_data:
@@ -200,15 +147,18 @@ class BasicEmbedModal(ui.Modal, title='Edit Basic Embed Info'):
         elif 'color' in current_data:
              del current_data['color']
 
-        save_custom_embed(self.guild_id, self.embed_name, current_data)
+        # Save updated data using save_custom_embed from database.py
+        database.save_custom_embed(self.guild_id, self.embed_name, current_data)
 
-        updated_data = get_custom_embed(self.guild_id, self.embed_name)
+        # Re-fetch data, create processed embed, and edit the original message
+        # Use get_custom_embed from database.py
+        updated_data = database.get_custom_embed(self.guild_id, self.embed_name) # Fetch saved data
         processed_embed = create_processed_embed(updated_data, user=interaction.user, guild=interaction.guild, channel=interaction.channel)
 
+        # Edit the message that triggered the modal (which is the message containing the View)
         await interaction.response.edit_message(embed=processed_embed)
 
 
-# Author Embed Modal (remains the same)
 class AuthorEmbedModal(ui.Modal, title='Edit Embed Author'):
     author_name = ui.TextInput(label='Author Name', style=discord.TextStyle.short, required=False, max_length=256)
     author_icon_url = ui.TextInput(label='Author Icon URL (optional)', style=discord.TextStyle.short, required=False)
@@ -217,13 +167,15 @@ class AuthorEmbedModal(ui.Modal, title='Edit Embed Author'):
         super().__init__()
         self.embed_name = embed_name
         self.guild_id = guild_id
-        if initial_data and 'author' in initial_data and isinstance(initial_data['author'], dict):
-             self.author_name.default = initial_data['author'].get('name', '')
-             self.author_icon_url.default = initial_data['author'].get('icon_url', '')
+        self.initial_data = initial_data or {} # Store initial data
+
+        if 'author' in self.initial_data and isinstance(self.initial_data['author'], dict):
+             self.author_name.default = self.initial_data['author'].get('name', '')
+             self.author_icon_url.default = self.initial_data['author'].get('icon_url', '')
 
 
     async def on_submit(self, interaction: discord.Interaction):
-        current_data = get_custom_embed(self.guild_id, self.embed_name) or {}
+        current_data = database.get_custom_embed(self.guild_id, self.embed_name) or {}
 
         author_name = self.author_name.value.strip() or None
         author_icon_url = self.author_icon_url.value.strip() or None
@@ -236,9 +188,9 @@ class AuthorEmbedModal(ui.Modal, title='Edit Embed Author'):
         elif 'author' in current_data:
              del current_data['author']
 
-        save_custom_embed(self.guild_id, self.embed_name, current_data)
+        database.save_custom_embed(self.guild_id, self.embed_name, current_data)
 
-        updated_data = get_custom_embed(self.guild_id, self.embed_name)
+        updated_data = database.get_custom_embed(self.guild_id, self.embed_name)
         processed_embed = create_processed_embed(updated_data, user=interaction.user, guild=interaction.guild, channel=interaction.channel)
 
         await interaction.response.edit_message(embed=processed_embed)
@@ -246,6 +198,7 @@ class AuthorEmbedModal(ui.Modal, title='Edit Embed Author'):
 
 # --- Footer Embed Modal (Modified) ---
 class FooterEmbedModal(ui.Modal, title='Edit Embed Footer'):
+    """Modal for editing embed footer info: text, timestamp toggle."""
     footer_text = ui.TextInput(label='Footer Text', style=discord.TextStyle.short, required=False, max_length=2048)
     add_timestamp = ui.TextInput(label='Add Timestamp? (yes/no)', style=discord.TextStyle.short, required=False, max_length=3)
 
@@ -253,22 +206,21 @@ class FooterEmbedModal(ui.Modal, title='Edit Embed Footer'):
         super().__init__()
         self.embed_name = embed_name
         self.guild_id = guild_id
-        if initial_data and 'footer' in initial_data and isinstance(initial_data['footer'], dict):
-             self.footer_text.default = initial_data['footer'].get('text', '')
-             # Pre-fill timestamp toggle based on boolean value
-             timestamp_enabled = initial_data['footer'].get('timestamp', False)
+        self.initial_data = initial_data or {} # Store initial data
+
+        if 'footer' in self.initial_data and isinstance(self.initial_data['footer'], dict):
+             self.footer_text.default = self.initial_data['footer'].get('text', '')
+             timestamp_enabled = self.initial_data['footer'].get('timestamp', False)
              self.add_timestamp.default = 'yes' if timestamp_enabled else 'no'
 
     async def on_submit(self, interaction: discord.Interaction):
-        current_data = get_custom_embed(self.guild_id, self.embed_name) or {}
+        current_data = database.get_custom_embed(self.guild_id, self.embed_name) or {}
 
         footer_text = self.footer_text.value.strip() or None
         add_timestamp_input = self.add_timestamp.value.strip().lower()
 
-        # Determine timestamp boolean based on input
         timestamp_enabled = add_timestamp_input == 'yes'
 
-        # Update current data
         if footer_text:
              footer_dict = {'text': footer_text}
              # Store the boolean value for timestamp in the footer dict
@@ -277,16 +229,16 @@ class FooterEmbedModal(ui.Modal, title='Edit Embed Footer'):
         elif 'footer' in current_data:
              del current_data['footer']
 
-        save_custom_embed(self.guild_id, self.embed_name, current_data)
+        database.save_custom_embed(self.guild_id, self.embed_name, current_data)
 
-        updated_data = get_custom_embed(self.guild_id, self.embed_name)
+        updated_data = database.get_custom_embed(self.guild_id, self.embed_name)
         processed_embed = create_processed_embed(updated_data, user=interaction.user, guild=interaction.guild, channel=interaction.channel)
 
         await interaction.response.edit_message(embed=processed_embed)
 
 
 # --- View with Buttons for Editing ---
-# (EmbedEditView remains the same)
+# (EmbedEditView remains the same, it uses the Modals)
 
 class EmbedEditView(ui.View):
     """A view with buttons to open modals for editing different parts of an embed."""
@@ -302,25 +254,28 @@ class EmbedEditView(ui.View):
 
     @ui.button(label='Edit Basic Info', style=discord.ButtonStyle.primary)
     async def edit_basic_button(self, interaction: discord.Interaction, button: ui.Button):
-        current_data = get_custom_embed(self.guild_id, self.embed_name)
+        # Use get_custom_embed from database.py
+        current_data = database.get_custom_embed(self.guild_id, self.embed_name)
         modal = BasicEmbedModal(self.embed_name, self.guild_id, current_data)
         await interaction.response.send_modal(modal)
 
     @ui.button(label='Edit Author', style=discord.ButtonStyle.primary)
     async def edit_author_button(self, interaction: discord.Interaction, button: ui.Button):
-        current_data = get_custom_embed(self.guild_id, self.embed_name)
+        # Use get_custom_embed from database.py
+        current_data = database.get_custom_embed(self.guild_id, self.embed_name)
         modal = AuthorEmbedModal(self.embed_name, self.guild_id, current_data)
         await interaction.response.send_modal(modal)
 
     @ui.button(label='Edit Footer', style=discord.ButtonStyle.primary)
     async def edit_footer_button(self, interaction: discord.Interaction, button: ui.Button):
-        current_data = get_custom_embed(self.guild_id, self.embed_name)
+        # Use get_custom_embed from database.py
+        current_data = database.get_custom_embed(self.guild_id, self.embed_name)
         modal = FooterEmbedModal(self.embed_name, self.guild_id, current_data)
         await interaction.response.send_modal(modal)
 
 
 # --- Embed Cog Class ---
-# (EmbedCog remains the same)
+# (EmbedCog methods use database functions)
 
 class EmbedCog(commands.Cog):
     """Cog for managing custom server embeds and using them."""
@@ -334,7 +289,8 @@ class EmbedCog(commands.Cog):
         channel = guild.system_channel
 
         if channel is not None:
-            welcome_embed_data = get_custom_embed(guild.id, "welcome")
+            # Use get_custom_embed from database.py
+            welcome_embed_data = database.get_custom_embed(guild.id, "welcome")
             if welcome_embed_data:
                 try:
                     embed = create_processed_embed(welcome_embed_data, member=member, guild=guild, channel=channel)
@@ -367,13 +323,15 @@ class EmbedCog(commands.Cog):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
-        existing_embed = get_custom_embed(interaction.guild_id, name)
+        # Use get_custom_embed from database.py
+        existing_embed = database.get_custom_embed(interaction.guild_id, name)
         if existing_embed:
              await interaction.response.send_message(f"An embed named '{name}' already exists. Use `/embed edit {name}` to modify it.", ephemeral=True)
              return
 
         initial_data = {}
-        save_custom_embed(interaction.guild_id, name, initial_data)
+        # Use save_custom_embed from database.py
+        database.save_custom_embed(interaction.guild_id, name, initial_data)
 
         preview_embed = create_processed_embed(initial_data, user=interaction.user, guild=interaction.guild, channel=interaction.channel)
         edit_view = EmbedEditView(name, interaction.guild_id)
@@ -393,7 +351,8 @@ class EmbedCog(commands.Cog):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
-        existing_data = get_custom_embed(interaction.guild_id, name)
+        # Use get_custom_embed from database.py
+        existing_data = database.get_custom_embed(interaction.guild_id, name)
         if existing_data is None:
             await interaction.response.send_message(f"No embed found with the name '{name}'.", ephemeral=True)
             return
@@ -415,7 +374,8 @@ class EmbedCog(commands.Cog):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
-        embed_names = get_all_custom_embed_names(interaction.guild_id)
+        # Use get_all_custom_embed_names from database.py
+        embed_names = database.get_all_custom_embed_names(interaction.guild_id)
 
         if not embed_names:
             await interaction.response.send_message("No custom embeds found for this server.", ephemeral=True)
@@ -436,7 +396,8 @@ class EmbedCog(commands.Cog):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
-        embed_data = get_custom_embed(interaction.guild_id, name)
+        # Use get_custom_embed from database.py
+        embed_data = database.get_custom_embed(interaction.guild_id, name)
 
         if embed_data is None:
             await interaction.response.send_message(f"No embed found with the name '{name}'.", ephemeral=True)
@@ -459,7 +420,8 @@ class EmbedCog(commands.Cog):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
-        deleted = delete_custom_embed(interaction.guild_id, name)
+        # Use delete_custom_embed from database.py
+        deleted = database.delete_custom_embed(interaction.guild_id, name)
 
         if deleted:
             await interaction.response.send_message(f"Custom embed '{name}' deleted successfully.", ephemeral=True)
