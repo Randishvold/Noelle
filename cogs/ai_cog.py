@@ -41,35 +41,43 @@ _image_generation_model_name = 'gemini-2.0-flash-preview-image-generation' # Asu
 # Tidak ada lagi _flash_text_model dan _flash_image_gen_model sebagai objek global
 # Kita akan menggunakan nama model langsung di panggilan API
 
+
 def initialize_gemini_client():
     """Initializes the Google AI client."""
     global _ai_client
 
     if GOOGLE_API_KEY is None:
         _logger.error("GOOGLE_API_KEY environment variable not set. Skipping Gemini client initialization. AI features will be unavailable.")
-        return False # Indikasi kegagalan
+        return False
 
     try:
         _ai_client = genai.Client(api_key=GOOGLE_API_KEY)
-        # Uji koneksi sederhana dengan listing models (opsional, tapi baik untuk verifikasi)
+        # Uji koneksi sederhana dengan listing models
         try:
-            models_list = list(_ai_client.models.list(page_size=1)) # Coba ambil 1 model
-            if models_list:
-                _logger.info(f"Google AI client initialized successfully. Found model: {models_list[0].name}")
-                return True # Indikasi sukses
+            # --- PERBAIKAN DI SINI ---
+            # Panggil list() tanpa argumen page_size
+            # Metode list() mengembalikan generator, jadi kita bisa coba ambil item pertama
+            model_iterator = _ai_client.models.list()
+            first_model = next(model_iterator, None) # Coba ambil item pertama, None jika kosong
+            # --- AKHIR PERBAIKAN ---
+
+            if first_model:
+                _logger.info(f"Google AI client initialized successfully. Found model: {first_model.name}")
+                return True
             else:
                 _logger.warning("Google AI client initialized, but could not list any models. Check API key permissions or model availability.")
-                return False # Indikasi potensi masalah
+                return False # Bisa jadi API key valid tapi tidak ada model yang bisa di-list (jarang)
+        except StopIteration: # Jika iterator kosong
+             _logger.warning("Google AI client initialized, but no models were returned by list(). Check API key permissions or model availability.")
+             return False
         except Exception as e_list:
             _logger.error(f"Google AI client initialized, but failed to list models: {e_list}", exc_info=True)
-            # Jika listing model gagal, _ai_client mungkin tetap ada, tapi tidak bisa dipakai.
-            # Anda bisa set _ai_client = None di sini jika ingin lebih strict.
-            return False # Indikasi kegagalan
+            return False
 
     except Exception as e:
         _logger.error(f"An unexpected error occurred during Google AI client initialization: {e}", exc_info=True)
         _ai_client = None
-        return False # Indikasi kegagalan
+        return False
 
 class AICog(commands.Cog):
     """Cog for AI interaction features using on_message listener and slash commands."""
