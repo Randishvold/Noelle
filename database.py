@@ -80,30 +80,25 @@ def get_collection():
             raise ConnectionFailure("Failed to connect to MongoDB.")
     return _collection
 
-
 def save_custom_embed(guild_id: int, embed_name: str, embed_data: dict):
     """Saves or updates a custom embed in the database."""
+    print(f"Attempting to save embed: name='{embed_name}', guild_id='{guild_id}', data_keys={list(embed_data.keys()) if isinstance(embed_data, dict) else embed_data}") # <-- Tambahkan baris ini
     collection = get_collection()
     try:
-        # Use replace_one with upsert=True to insert if not exists, or replace if exists
         result = collection.replace_one(
             {'guild_id': guild_id, 'embed_name': embed_name},
-            embed_data, # pymongo handles converting dict to BSON
-            upsert=True # Insert if document not found
+            embed_data,
+            upsert=True
         )
-        # result.upserted_id will be the _id if a new document was inserted
-        # result.modified_count will be 1 if an existing document was updated
-        # print(f"Embed '{embed_name}' for guild {guild_id} saved/updated. Upserted ID: {result.upserted_id}, Modified Count: {result.modified_count}")
-        return result.upserted_id or result.modified_count > 0 # Return True/False indication
+        return result.upserted_id or result.modified_count > 0
 
     except OperationFailure as e:
         print(f"MongoDB operation failed during save_custom_embed: {e}")
-        # Handle potential errors like unique index violation (less likely with replace_one)
+        # Return False on failure
         return False
     except PyMongoError as e:
         print(f"An unexpected PyMongo error occurred during save_custom_embed: {e}")
         return False
-
 
 def get_custom_embed(guild_id: int, embed_name: str):
     """Retrieves a custom embed from the database."""
