@@ -861,28 +861,35 @@ class BasicCommandsCog(commands.Cog):
 
     # --- Error Handler for basic commands ---
     # This handler catches errors specifically for commands defined in THIS cog.
-    # --- FIX: Updated signature to accept 'binding' ---
-    async def basic_command_error(self, binding, interaction: discord.Interaction, error: app_commands.AppCommandError):
+    # --- FIX: Updated signature to accept standard interaction and error ---
+    async def basic_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         """Error handler for basic commands."""
+        _logger.error(f"Handling Basic command error for command {interaction.command.name if interaction.command else 'Unknown'} by user {interaction.user.id if interaction.user else 'Unknown'} in guild {interaction.guild_id if interaction.guild_id else 'DM'}.", exc_info=True) # Log handler start and traceback
+
         # Ensure we can send a message even if interaction response is done
         send_func = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
 
-        if isinstance(error, app_commands.MissingPermissions):
-             _logger.warning(f"MissingPermissions error for user {interaction.user.id} on command {interaction.command.name}: {error.missing_permissions}")
-             await send_func("Anda tidak memiliki izin untuk menggunakan perintah ini.", ephemeral=True)
-        elif isinstance(error, app_commands.CheckFailure): # Catches custom CheckFailure specifically and @app_commands.guild_only()
-             _logger.warning(f"CheckFailure error for user {interaction.user.id} on command {interaction.command.name}: {error}")
-             await send_func(str(error), ephemeral=True) # Send the custom message from CheckFailure
-        elif isinstance(error, app_commands.CommandInvokeError):
-             _logger.error(f"CommandInvokeError in basic command {interaction.command.name}: {error.original}", exc_info=error.original)
-             # Log the traceback for CommandInvokeError's original exception
-             await send_func(f"Terjadi error saat mengeksekusi perintah: {error.original}", ephemeral=True)
-        elif isinstance(error, app_commands.TransformerError):
-             _logger.warning(f"TransformerError in basic command {interaction.command.name}: {error.original}")
-             await send_func(f"Nilai tidak valid diberikan untuk argumen '{error.param_name}': {error.original}", ephemeral=True)
-        else:
-            _logger.error(f"An unexpected error occurred in basic command {interaction.command.name}: {error}", exc_info=True)
-            await send_func(f"Terjadi error tak terduga: {error}", ephemeral=True)
+        # Try to send the error message
+        try:
+            if isinstance(error, app_commands.MissingPermissions):
+                 _logger.warning(f"MissingPermissions error: {error.missing_permissions}")
+                 await send_func("Anda tidak memiliki izin untuk menggunakan perintah ini.", ephemeral=True)
+            elif isinstance(error, app_commands.CheckFailure): # Catches custom CheckFailure specifically and @app_commands.guild_only()
+                 _logger.warning(f"CheckFailure error: {error}")
+                 await send_func(str(error), ephemeral=True) # Send the custom message from CheckFailure
+            elif isinstance(error, app_commands.CommandInvokeError):
+                 _logger.error(f"CommandInvokeError in basic command: {error.original}", exc_info=error.original)
+                 await send_func(f"Terjadi error saat mengeksekusi perintah: {error.original}", ephemeral=True)
+            elif isinstance(error, app_commands.TransformerError):
+                 _logger.warning(f"TransformerError in basic command: {error.original}")
+                 await send_func(f"Nilai tidak valid diberikan untuk argumen '{error.param_name}': {error.original}", ephemeral=True)
+            else:
+                _logger.error(f"An unexpected error occurred in basic command: {error}", exc_info=True)
+                await send_func(f"Terjadi error tak terduga: {error}", ephemeral=True)
+
+        except Exception as send_error_e:
+            _logger.error(f"Failed to send error message in basic command error handler: {send_error_e}", exc_info=True)
+            print(f"FATAL ERROR in Basic command handler for {interaction.command.name}: {error}. Also failed to send error message: {send_error_e}")
     # --- END FIX ---
 
 

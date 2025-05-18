@@ -14,11 +14,8 @@ import base64 # Required for decoding inline image data
 # Import specific types and exceptions from genai.types
 import google.generativeai.types as genai_types
 # --- FIX: Import APIError directly from genai ---
-# No, based on the latest log, APIError is in genai.types
-# Let's confirm: BlockedPromptException, StopCandidateException are in genai.types
-# APIError also seems to be in genai.types based on the latest traceback attempt
-# Let's rely on genai_types for exceptions shown in its traceback.
-# from google.generativeai import APIError # <-- Removed this import, relying on genai_types
+from google.generativeai import APIError # Import APIError from the top level
+# --- END FIX ---
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
@@ -244,8 +241,8 @@ class AICog(commands.Cog):
                     except genai_types.StopCandidateException as e:
                          _logger.warning(f"Gemini response stopped prematurely in AI channel: {e}")
                          await message.reply("Maaf, respons AI terhenti di tengah jalan.")
-                    # --- FIX: Changed genai.APIError to genai_types.APIError ---
-                    except genai_types.APIError as e: # Catches API errors from generate_content_async
+                    # --- FIX: Changed genai_types.APIError to genai.APIError ---
+                    except APIError as e: # Catches API errors from generate_content_async
                         _logger.error(f"Gemini API Error during AI channel processing (on_message): {e}", exc_info=True)
                         await message.reply(f"Terjadi error pada API AI: {e}")
                     # --- END FIX ---
@@ -323,8 +320,8 @@ class AICog(commands.Cog):
                  except genai_types.StopCandidateException as e:
                       _logger.warning(f"Gemini response stopped prematurely for mention: {e}")
                       await message.reply("Maaf, respons AI terhenti.")
-                 # --- FIX: Changed genai.APIError to genai_types.APIError ---
-                 except genai_types.APIError as e:
+                 # --- FIX: Changed genai_types.APIError to APIError (imported from genai) ---
+                 except APIError as e:
                      _logger.error(f"Gemini API Error during mention processing: {e}", exc_info=True)
                      await message.reply(f"Terjadi error pada API AI: {e}")
                  # --- END FIX ---
@@ -344,7 +341,7 @@ class AICog(commands.Cog):
     @app_commands.guild_only() # Ensure command is in guild
     async def generate_image_slash(self, interaction: discord.Interaction, prompt: str):
         """Generates an image based on a text prompt using the image generation model."""
-        _logger.info(f"Received /generate_image command from {interaction.user.id} with prompt: '{prompt}' in guild {interaction.guild.id}.")
+        _logger.info(f"Received /generate_image command from {interaction.user.id} with prompt: '{prompt}' in guild {interaction.guild_id}.")
 
         # Check if the command is used in the designated AI channel for this server
         config = database.get_server_config(interaction.guild_id)
@@ -380,14 +377,13 @@ class AICog(commands.Cog):
         try:
             _logger.info(f"Calling image generation model for prompt: '{prompt}'.")
             # Call the image generation model with required config (ASYNC)
+            # --- FIX: Removed response_modalities from GenerationConfig constructor ---
             response = await model.generate_content_async(
                  prompt, # Input is just the text prompt for generation
-                 # --- FIX: Changed GenerateContentConfig to GenerationConfig ---
-                 generation_config=genai_types.GenerationConfig(
-                     response_modalities=['TEXT', 'IMAGE'] # Request both text and image output
-                 )
-                 # --- END FIX ---
+                 generation_config=genai_types.GenerationConfig(), # GenerationConfig object (empty or with parameters like temperature)
+                 response_modalities=['TEXT', 'IMAGE'] # Pass response_modalities directly to generate_content_async
             )
+            # --- END FIX ---
             _logger.info(f"Received response from Gemini API for image generation.")
 
             # --- Parsing the response for both text and image ---
@@ -516,8 +512,8 @@ class AICog(commands.Cog):
         except genai_types.StopCandidateException as e:
              _logger.warning(f"Gemini response stopped prematurely during image generation: {e}")
              await interaction.followup.send("Maaf, proses generate gambar terhenti di tengah jalan.")
-        # --- FIX: Changed genai.APIError to genai_types.APIError ---
-        except genai_types.APIError as e:
+        # --- FIX: Changed genai_types.APIError to APIError (imported from genai) ---
+        except APIError as e:
             _logger.error(f"Gemini API Error during generate_image: {e}", exc_info=True)
             await interaction.followup.send(f"Terjadi error pada API AI saat generate gambar: {e}")
         # --- END FIX ---
@@ -528,10 +524,10 @@ class AICog(commands.Cog):
 
     # --- Shared Error Handler for AI Cog Slash Commands ---
     # This handler catches errors specifically for slash commands defined in THIS cog (e.g., /generate_image).
-    # --- FIX: Updated signature to accept 'binding' ---
-    async def ai_command_error(self, binding, interaction: discord.Interaction, error: app_commands.AppCommandError):
+    # --- FIX: Updated signature to accept standard interaction and error ---
+    async def ai_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         """Error handler for AI slash commands."""
-        _logger.error(f"Handling AI command error for command {interaction.command.name} by user {interaction.user.id} in guild {interaction.guild_id}.", exc_info=True) # Log handler start and traceback
+        _logger.error(f"Handling AI command error for command {interaction.command.name if interaction.command else 'Unknown'} by user {interaction.user.id if interaction.user else 'Unknown'} in guild {interaction.guild_id if interaction.guild_id else 'DM'}.", exc_info=True) # Log handler start and traceback
 
         # Ensure we can send a message even if interaction response is done
         # For slash commands, followup is preferred after defer.
@@ -562,7 +558,15 @@ class AICog(commands.Cog):
 
             elif isinstance(error, app_commands.CommandInvokeError):
                  _logger.error(f"CommandInvokeError in AI command: {error.original}", exc_info=error.original)
-                 await send_func(f"Terjadi error saat mengeksekusi command AI: {error.original}", ephemeral=True)
+                 # Check if the original error is an APIError from Google
+                 if isinstance(error.original, APIError):
+                      await send_func(f"Terjadi error pada API AI: {error.original}", ephemeral=True)
+                 elif isinstance(error.original, genai_types.BlockedPromptException) or isinstance(error.original, genai_types.StopCandidateException):
+                       # These should ideally be caught in the command itself, but handle here as fallback
+                       await send_func(f"Respons AI diblokir atau terhenti: {error.original}", ephemeral=True)
+                 else: # Other invoke errors
+                      await send_func(f"Terjadi error saat mengeksekusi command AI: {error.original}", ephemeral=True)
+
             elif isinstance(error, app_commands.TransformerError):
                  _logger.warning(f"TransformerError in AI command: {error.original}")
                  await send_func(f"Nilai tidak valid diberikan untuk argumen '{error.param_name}': {error.original}", ephemeral=True)
@@ -591,7 +595,7 @@ async def setup(bot: commands.Bot):
     # Check if at least one model was initialized successfully
     # Load the cog if *either* is available, checks inside on_message/commands will handle disabled features.
     if _flash_text_model is None and _flash_image_gen_model is None:
-         _logger.error("All Gemini models failed to initialize. AICog will not be loaded.")
+         _logger.error("All Gemini models failed to initialize. AI features will be unavailable.")
          return # Do not load the cog if no models are available
 
     cog_instance = AICog(bot)
