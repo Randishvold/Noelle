@@ -164,6 +164,7 @@ DEFAULT_SERVER_CONFIG = {
     'mod_roles': [], # List of role IDs that can use moderation commands (kick, ban, purge)
     'role_manager_roles': [], # List of role IDs that can use role management commands (addrole, removerole)
     # Add other default settings here later if needed
+    'ai_channel_id': None,
 }
 
 def get_server_config(guild_id: int):
