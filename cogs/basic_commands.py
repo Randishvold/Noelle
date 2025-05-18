@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
+import asyncio # Import asyncio for sleep and create_task
 # Import database module to load embeds
 import database
 import utils # Import utils from parent directory
@@ -10,6 +11,43 @@ class BasicCommandsCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    # --- Scheduled Task Helper ---
+    async def _schedule_announcement_task(self, delay_seconds: float, target_channel: discord.TextChannel, embed_data: dict, invoker_user: discord.User, invoker_guild: discord.Guild, invoker_channel: discord.TextChannel):
+        """Waits for a delay and sends the announcement embed."""
+        await asyncio.sleep(delay_seconds)
+
+        # Re-create and process the embed right before sending
+        # Pass the context from the command invocation
+        try:
+            final_embed_object = utils.create_processed_embed(
+                embed_data,
+                user=invoker_user,
+                member=invoker_user if invoker_guild else None, # Ensure member context if available
+                guild=invoker_guild,
+                channel=invoker_channel # Context of the command invocation channel
+            )
+        except Exception as e:
+            print(f"Error creating final embed object in scheduled task: {e}")
+            # Optionally inform the channel where command was invoked about the failure
+            if invoker_channel:
+                 await invoker_channel.send(f"Failed to send scheduled announcement: Could not prepare embed. Error: {e}")
+            return # Stop if embed creation fails
+
+        # Send the embed to the target channel
+        try:
+            await target_channel.send(embed=final_embed_object)
+            print(f"Scheduled announcement sent to {target_channel.name} in {target_channel.guild.name} after {delay_seconds} seconds.")
+        except discord.errors.Forbidden:
+            print(f"Failed to send scheduled announcement: Missing permissions in {target_channel.name} ({target_channel.id}) in guild {target_channel.guild.name} ({target_channel.guild.id}).")
+             # Optionally inform the user who scheduled it (if they are still reachable)
+            # This is more complex, requires storing user ID and potentially sending DM.
+            # For simplicity, just log the error for now.
+        except Exception as e:
+            print(f"An error occurred while sending scheduled announcement: {e}")
+            if invoker_channel:
+                 await invoker_channel.send(f"Failed to send scheduled announcement: An error occurred during sending. Error: {e}")
+
 
     @app_commands.command(name="ping", description="Responds with Pong! and bot latency.")
     async def ping_slash(self, interaction: discord.Interaction):
@@ -37,7 +75,7 @@ class BasicCommandsCog(commands.Cog):
         processed_text = utils.replace_variables(
             text,
             user=interaction.user,
-            member=interaction.user, # User is also a member in a guild
+            member=interaction.user,
             guild=interaction.guild,
             channel=interaction.channel
         )
@@ -74,99 +112,103 @@ class BasicCommandsCog(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # --- New Command: /pengumuman ---
-    @app_commands.command(name="pengumuman", description="Send an announcement with optional custom embed.")
+    # --- Modified Command: /pengumuman ---
+    @app_commands.command(name="pengumuman", description="Send an announcement with optional custom embed and timer.")
     @app_commands.describe(title="The title for the announcement.")
     @app_commands.describe(teks="The main text content for the announcement.")
     @app_commands.describe(channel="The channel to send the announcement in.")
     @app_commands.describe(embed="The name of the custom embed template to use (optional).")
-    # Timer is optional and not implemented yet
-    # @app_commands.describe(timer="Countdown in minutes before sending (optional, not yet implemented).")
+    # app_commands.Range[int, 1, None] means integer, minimum value 1, no maximum
+    @app_commands.describe(timer="Countdown in minutes before sending (optional, min 1 minute).")
     @commands.has_permissions(manage_messages=True) # Requires permission to manage messages
-    async def pengumuman_slash(self, interaction: discord.Interaction, title: str, teks: str, channel: discord.TextChannel, embed: str = None): # timer: int = None
-        """Sends a custom announcement message."""
+    async def pengumuman_slash(self, interaction: discord.Interaction, title: str, teks: str, channel: discord.TextChannel, embed: str = None, timer: app_commands.Range[int, 1, None] = None):
+        """Sends a custom announcement message with optional embed and timer."""
         if interaction.guild_id is None:
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
-        embed_data = None # Start with no embed data
+        embed_data = None
 
-        if embed: # If an embed name is provided
-            # Load embed data from the database
+        if embed:
             loaded_embed_data = database.get_custom_embed(interaction.guild_id, embed)
-
             if loaded_embed_data is None:
-                # Inform the user if the embed template was not found
                 await interaction.response.send_message(f"Custom embed template '{embed}' not found.", ephemeral=True)
-                return # Stop execution if embed not found
+                return
 
-            embed_data = loaded_embed_data # Use the loaded data as base
+            embed_data = loaded_embed_data
+        else:
+            embed_data = {}
 
-        else: # If no embed name is provided, create a simple embed structure
-            embed_data = {} # Start with an empty dictionary
-
-        # --- Inject (Override) title and description from command input ---
-        # Ensure the data is treated as a dictionary
         if not isinstance(embed_data, dict):
              print(f"Warning: embed_data was not a dict. Found type: {type(embed_data)}. Starting with empty dict.")
-             embed_data = {} # Fallback to empty dict if loaded data was invalid
+             embed_data = {}
 
-        # Override title and description with user input.
-        # These inputs can also contain variables themselves (e.g., {user.name})
+        # Inject (Override) title and description from command input
         embed_data['title'] = title
         embed_data['description'] = teks
 
-        # --- Create the final discord.Embed object with variables processed ---
-        # Use the create_processed_embed helper function from embed_cog
-        # Note: create_processed_embed is defined in embed_cog. We need to access it.
-        # Option 1: Move create_processed_embed to utils.py (Recommended for utility functions)
-        # Option 2: Access it via bot.get_cog('EmbedCog').create_processed_embed (More complex)
-        # Let's move create_processed_embed to utils.py for better modularity.
-        # (Assume create_processed_embed is now in utils.py - requires updating utils.py)
-        try:
-            # Pass the modified embed_data to the helper function
-            # Pass context from the interaction
-            final_embed_object = utils.create_processed_embed(
-                embed_data,
-                user=interaction.user,
-                member=interaction.user, # interaction.user is also a member in a guild
-                guild=interaction.guild,
-                channel=interaction.channel # Context of the command invocation channel
+        # --- Handle Timer ---
+        if timer is not None and timer > 0:
+            delay_seconds = timer * 60 # Convert minutes to seconds
+
+            # Acknowledge the interaction immediately
+            await interaction.response.send_message(f"Announcement scheduled to be sent to {channel.mention} in {timer} minutes!", ephemeral=True)
+
+            # Create and schedule the task
+            # Pass necessary info to the task
+            self.bot.loop.create_task(
+                self._schedule_announcement_task(
+                    delay_seconds,
+                    channel, # Target channel
+                    embed_data, # Embed data dictionary
+                    interaction.user, # Invoker user
+                    interaction.guild, # Invoker guild
+                    interaction.channel # Invoker channel (for error messages in task)
+                )
             )
+            print(f"Announcement task scheduled for {delay_seconds} seconds.")
 
-        except Exception as e:
-            print(f"Error creating final embed object in /pengumuman: {e}")
-            await interaction.response.send_message(f"An error occurred while preparing the embed: {e}", ephemeral=True)
-            return # Stop if embed creation fails
+        else: # No timer or timer is 0/None, send immediately
+            # Create the final discord.Embed object with variables processed
+            try:
+                final_embed_object = utils.create_processed_embed(
+                    embed_data,
+                    user=interaction.user,
+                    member=interaction.user,
+                    guild=interaction.guild,
+                    channel=interaction.channel
+                )
+            except Exception as e:
+                print(f"Error creating final embed object for immediate send: {e}")
+                await interaction.response.send_message(f"An error occurred while preparing the embed for sending: {e}", ephemeral=True)
+                return
 
+            # Send the embed immediately
+            try:
+                await channel.send(embed=final_embed_object)
+                # Acknowledge the command interaction with a success message
+                await interaction.response.send_message(f"Announcement sent to {channel.mention}!", ephemeral=True)
+                print(f"Announcement sent immediately to {channel.name} in {channel.guild.name}.")
 
-        # --- Send the embed to the target channel ---
-        try:
-            # Discord permissions check will handle if bot cannot send to channel
-            await channel.send(embed=final_embed_object)
-
-            # Acknowledge the command interaction
-            # Use followup.send because interaction.response has already been used if embed was not found
-            # Or simply send an ephemeral success message. Ephemeral is cleaner.
-            await interaction.response.send_message(f"Announcement sent to {channel.mention}!", ephemeral=True)
-
-        except discord.errors.Forbidden:
-             await interaction.response.send_message(f"I do not have permission to send messages in {channel.mention}.", ephemeral=True)
-        except Exception as e:
-            print(f"Error sending announcement embed: {e}")
-            await interaction.response.send_message(f"An error occurred while sending the announcement: {e}", ephemeral=True)
+            except discord.errors.Forbidden:
+                 await interaction.response.send_message(f"I do not have permission to send messages in {channel.mention}.", ephemeral=True)
+            except Exception as e:
+                print(f"An error occurred while sending the announcement immediately: {e}")
+                await interaction.response.send_message(f"An error occurred while sending the announcement: {e}", ephemeral=True)
 
 
     # --- Error Handler for basic commands (add pengumuman to it) ---
-    # Assuming you have a general error handler or add one like this:
     async def basic_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         """Error handler for basic commands."""
         if isinstance(error, app_commands.MissingPermissions):
              await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
         elif isinstance(error, app_commands.CommandInvokeError):
-             # Log the original exception from CommandInvokeError
              print(f"CommandInvokeError in basic command: {error.original}")
              await interaction.response.send_message(f"An error occurred while executing the command: {error.original}", ephemeral=True)
+        # Add handling for RangeError for the timer argument
+        elif isinstance(error, app_commands.TransformerError) and isinstance(error.original, ValueError):
+             # This might catch errors from app_commands.Range if input is invalid
+             await interaction.response.send_message(f"Invalid value provided for an argument: {error.original}", ephemeral=True)
         else:
             print(f"An unexpected error occurred in basic command: {error}")
             await interaction.response.send_message(f"An unexpected error occurred: {error}", ephemeral=True)
@@ -174,7 +216,7 @@ class BasicCommandsCog(commands.Cog):
     # Attach error handlers to the commands
     say_slash.error(basic_command_error)
     variables_slash.error(basic_command_error)
-    # --- Attach error handler to the new command ---
+    # --- Attach error handler to the modified command ---
     pengumuman_slash.error(basic_command_error)
 
 
@@ -182,4 +224,3 @@ class BasicCommandsCog(commands.Cog):
 async def setup(bot: commands.Bot):
     """Sets up the BasicCommands cog."""
     await bot.add_cog(BasicCommandsCog(bot))
-    # No need to sync here, sync is done in on_ready in bot.py
