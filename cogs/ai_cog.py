@@ -1,4 +1,3 @@
---- START OF FILE cogs/ai_cog.py (USING google-genai) ---
 import discord
 import os
 # --- FIX: Import from google.genai ---
