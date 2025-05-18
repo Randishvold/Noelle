@@ -1,3 +1,4 @@
+--- START OF FILE cogs/ai_cog.py (FINAL INDENTATION FIX 2) ---
 import discord
 import os
 # --- Import from google.genai ---
@@ -74,7 +75,7 @@ def initialize_gemini():
         _flash_image_gen_model = None
 
 
-# Initialize Gemini when this cog file is imported
+# Initialize Google AI when this cog file is imported
 initialize_gemini()
 
 
@@ -511,14 +512,14 @@ class AICog(commands.Cog):
                                      await interaction.followup.send(header + chunk)
                                      _logger.debug(f"Sent accompanying text chunk {i+1}/{len(chunks)}.")
                                      response_sent = True
-                               except Exception as send_e:
+                                except Exception as send_e:
                                      _logger.error(f"Failed to send accompanying text chunk {i+1}/{len(chunks)}: {send_e}", exc_info=True)
                                      try:
                                           await interaction.channel.send(f"Gagal mengirim bagian teks pendamping {i+1} karena error: {send_e}") # Send in channel as followup might be limited
                                      except Exception as send_e_again:
                                           _logger.error(f"Failed to send error message for failed accompanying text chunk: {send_e_again}")
 
-                                await asyncio.sleep(0.5)
+                              await asyncio.sleep(0.5)
                       else:
                            await interaction.followup.send(response_text)
                            _logger.info("Generate Image: Accompanying text response sent.")
