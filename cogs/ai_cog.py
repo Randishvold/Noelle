@@ -1,4 +1,3 @@
---- START OF FILE cogs/ai_cog.py (FINAL FIXES & APIError IMPORT) ---
 import discord
 import os
 import google.generativeai as genai
