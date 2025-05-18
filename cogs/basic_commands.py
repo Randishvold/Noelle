@@ -4,7 +4,7 @@ from discord import app_commands
 import asyncio
 import database
 import utils
-import datetime # Import datetime if needed for user/server info formatting, though utils.format_date is available
+import datetime
 
 class BasicCommandsCog(commands.Cog):
     """Basic utility, moderation, and info commands."""
@@ -17,7 +17,6 @@ class BasicCommandsCog(commands.Cog):
         await asyncio.sleep(delay_seconds)
 
         try:
-            # Use utils.create_processed_embed (assuming it's moved to utils.py)
             final_embed_object = utils.create_processed_embed(
                 embed_data,
                 user=invoker_user,
@@ -153,7 +152,6 @@ class BasicCommandsCog(commands.Cog):
 
         else:
             try:
-                # Use utils.create_processed_embed (assuming it's moved to utils.py)
                 final_embed_object = utils.create_processed_embed(
                     embed_data,
                     user=interaction.user,
@@ -191,7 +189,7 @@ class BasicCommandsCog(commands.Cog):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
-        # Prevent kicking self or server owner (usually not possible due to permissions anyway)
+        # Prevent kicking self or server owner
         if member.id == interaction.user.id:
              await interaction.response.send_message("You cannot kick yourself.", ephemeral=True)
              return
@@ -200,12 +198,11 @@ class BasicCommandsCog(commands.Cog):
              return
 
         # Prevent bot from kicking members higher in hierarchy
-        if member.top_role >= interaction.guild.me.top_role: # Check bot's highest role vs target's highest role
+        if member.top_role >= interaction.guild.me.top_role:
             await interaction.response.send_message("I cannot kick this member as their highest role is equal to or higher than mine.", ephemeral=True)
             return
 
         try:
-            # Defer the response because kicking can take a moment
             await interaction.response.defer(ephemeral=True)
             await member.kick(reason=reason)
             await interaction.followup.send(f'{member.mention} has been kicked.' + (f' Reason: {reason}' if reason else ''))
@@ -233,13 +230,12 @@ class BasicCommandsCog(commands.Cog):
              await interaction.response.send_message("You cannot ban the server owner.", ephemeral=True)
              return
 
-        if member.top_role >= interaction.guild.me.top_role: # Check bot's highest role vs target's highest role
+        if member.top_role >= interaction.guild.me.top_role:
             await interaction.response.send_message("I cannot ban this member as their highest role is equal to or higher than mine.", ephemeral=True)
             return
 
         try:
             await interaction.response.defer(ephemeral=True)
-            # Ban also takes reason
             await member.ban(reason=reason)
             await interaction.followup.send(f'{member.mention} has been banned.' + (f' Reason: {reason}' if reason else ''))
         except discord.errors.Forbidden:
@@ -263,21 +259,19 @@ class BasicCommandsCog(commands.Cog):
 
         embed = discord.Embed(
             title=f"Server Info: {guild.name}",
-            color=discord.Color.blue() # You can use a fixed color or get average color from icon
+            color=discord.Color.blue()
         )
-        if guild.icon: # Add server icon as thumbnail if available
+        if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
 
-        # Add fields
         embed.add_field(name="Server ID", value=guild.id, inline=True)
         embed.add_field(name="Owner", value=guild.owner.mention if guild.owner else "N/A", inline=True)
-        embed.add_field(name="Created On", value=utils.format_date(guild.created_at), inline=False) # Use your helper for date formatting
+        embed.add_field(name="Created On", value=utils.format_date(guild.created_at), inline=False)
         embed.add_field(name="Member Count", value=guild.member_count, inline=True)
         embed.add_field(name="Channel Count", value=len(guild.channels), inline=True)
         embed.add_field(name="Role Count", value=len(guild.roles), inline=True)
         embed.add_field(name="Boost Level", value=f"{guild.premium_tier} (Boosts: {guild.premium_subscription_count})", inline=True)
-        embed.add_field(name="Verification Level", value=str(guild.verification_level).split('.')[-1].capitalize(), inline=True) # Format enum name
-        # You can add more fields like features, sticker count, emoji count etc.
+        embed.add_field(name="Verification Level", value=str(guild.verification_level).split('.')[-1].capitalize(), inline=True)
 
         await interaction.response.send_message(embed=embed)
 
@@ -290,33 +284,29 @@ class BasicCommandsCog(commands.Cog):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
-        # Default to the user who ran the command if no member is specified
         target_member = member or interaction.user
 
         embed = discord.Embed(
-            title=f"User Info: {target_member.display_name}", # Use display_name (nickname or username)
-            color=target_member.color if target_member.color != discord.Color.default() else discord.Color.blue() # Use member's color if not default
+            title=f"User Info: {target_member.display_name}",
+            color=target_member.color if target_member.color != discord.Color.default() else discord.Color.blue()
         )
-        if target_member.avatar: # Add user avatar as thumbnail
+        if target_member.avatar:
             embed.set_thumbnail(url=target_member.avatar.url)
-        if target_member.guild_avatar: # Add guild avatar if exists
-             embed.set_image(url=target_member.guild_avatar.url) # Use set_image for larger image
+        if target_member.guild_avatar:
+             embed.set_image(url=target_member.guild_avatar.url)
 
-        embed.add_field(name="Username", value=f"{target_member.name}#{target_member.discriminator}" if target_member.discriminator != '0' else target_member.name, inline=True) # Handle new username system
+        embed.add_field(name="Username", value=f"{target_member.name}#{target_member.discriminator}" if target_member.discriminator != '0' else target_member.name, inline=True)
         embed.add_field(name="ID", value=target_member.id, inline=True)
-        embed.add_field(name="Account Created", value=utils.format_date(target_member.created_at), inline=False) # Use your helper for date formatting
-        embed.add_field(name="Joined Server", value=utils.format_date(target_member.joined_at), inline=False) # Use your helper for date formatting
+        embed.add_field(name="Account Created", value=utils.format_date(target_member.created_at), inline=False)
+        embed.add_field(name="Joined Server", value=utils.format_date(target_member.joined_at), inline=False)
 
-        # List roles (excluding @everyone)
         roles = [role.mention for role in target_member.roles if role.name != '@everyone']
         if roles:
             embed.add_field(name=f"Roles ({len(roles)})", value=", ".join(roles), inline=False)
         else:
              embed.add_field(name="Roles (0)", value="None", inline=False)
 
-        # Add other info like top role, status etc. if desired
         embed.add_field(name="Highest Role", value=target_member.top_role.mention, inline=True)
-        # Check for pending status (for new members)
         if target_member.pending:
              embed.add_field(name="Pending", value="Yes", inline=True)
 
@@ -335,8 +325,8 @@ class BasicCommandsCog(commands.Cog):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
-        # Prevent giving @everyone role manually (it's default)
-        if role.is_everyone:
+        # FIX: Change role.is_everyone to role == interaction.guild.default_role
+        if role == interaction.guild.default_role:
              await interaction.response.send_message("Cannot manually add the @everyone role.", ephemeral=True)
              return
 
@@ -345,8 +335,7 @@ class BasicCommandsCog(commands.Cog):
              await interaction.response.send_message("I cannot give this role as it is equal to or higher than my highest role.", ephemeral=True)
              return
 
-        # Prevent user giving roles higher than their own highest role
-        # (Optional, but good practice)
+        # Prevent user giving roles higher than their own highest role (Optional)
         # if role >= interaction.user.top_role:
         #     await interaction.response.send_message("You cannot give a role higher than your own highest role.", ephemeral=True)
         #     return
@@ -377,7 +366,8 @@ class BasicCommandsCog(commands.Cog):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
-        if role.is_everyone:
+        # FIX: Change role.is_everyone to role == interaction.guild.default_role
+        if role == interaction.guild.default_role:
              await interaction.response.send_message("Cannot manually remove the @everyone role.", ephemeral=True)
              return
 
@@ -406,18 +396,17 @@ class BasicCommandsCog(commands.Cog):
             print(f"Error removing role: {e}")
             await interaction.followup.send(f"An error occurred while trying to remove the role {role.mention}.", ephemeral=True)
 
+
     # --- Error Handler for basic commands ---
     async def basic_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         """Error handler for basic commands."""
         if isinstance(error, app_commands.MissingPermissions):
-             # Deferring might have already happened, check interaction.response.is_done()
              if interaction.response.is_done():
                  await interaction.followup.send("You don't have permission to use this command.", ephemeral=True)
              else:
                  await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
         elif isinstance(error, app_commands.CommandInvokeError):
              print(f"CommandInvokeError in basic command: {error.original}")
-             # Check if response was deferred
              if interaction.response.is_done():
                  await interaction.followup.send(f"An error occurred while executing the command: {error.original}", ephemeral=True)
              else:
@@ -436,12 +425,11 @@ class BasicCommandsCog(commands.Cog):
 
 
     # Attach error handlers to the commands
-    ping_slash.error(basic_command_error) # Make sure all basic commands are attached
+    ping_slash.error(basic_command_error)
     hello_slash.error(basic_command_error)
     say_slash.error(basic_command_error)
     variables_slash.error(basic_command_error)
     pengumuman_slash.error(basic_command_error)
-    # --- Attach error handlers for new commands ---
     kick_slash.error(basic_command_error)
     ban_slash.error(basic_command_error)
     serverinfo_slash.error(basic_command_error)
