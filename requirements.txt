@@ -2,3 +2,5 @@ discord.py
 python-dotenv
 asyncio
 pymongo
+google-generativeai
+pillow
