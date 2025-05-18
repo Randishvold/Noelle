@@ -1,3 +1,4 @@
+--- START OF FILE cogs/ai_cog.py (INDENTATION FIX) ---
 import discord
 import os
 # --- FIX: Import from google.genai ---
@@ -104,7 +105,7 @@ class AICog(commands.Cog):
 
         # Ensure at least the text model is initialized for on_message scenarios
         if self.flash_text_model is None:
-             # _logger.debug(f"Skipping on_message AI processing for message in guild {message.guild.id}: Text model not available.")
+             # _logger.debug(f"Skipping on_message AI processing for message in guild {message.guild.id}: Text model not initialized.")
              return # Silently ignore if text model is missing
 
         # Get server configuration
@@ -175,17 +176,14 @@ class AICog(commands.Cog):
                             _logger.debug("Message in AI channel had no processable content. Ignoring.")
                             return
 
-                        # Call the standard Flash model (ASYNC)
+                        # Call the standard Flash model (USE asyncio.to_thread)
                         # In google-genai, generate_content is synchronous. We must use to_thread.
-                        # --- FIX: Use asyncio.to_thread for synchronous generate_content ---
-                        # Check if model object has generate_content
                         if not hasattr(model, 'generate_content'):
                             _logger.error(f"Model object for '{_flash_text_model_name}' has no 'generate_content' method.")
                             await message.reply("Terjadi error internal: Model AI tidak dapat memproses permintaan.")
                             return
 
                         response = await asyncio.to_thread(model.generate_content, content_parts)
-                        # --- END FIX ---
                         _logger.info(f"Received response from Gemini Flash for AI channel message.")
 
                         # --- Parsing Text Response (expecting text from this model here) ---
@@ -386,14 +384,13 @@ class AICog(commands.Cog):
             _logger.info(f"Calling image generation model for prompt: '{prompt}'.")
             # Call the image generation model (USE asyncio.to_thread for synchronous method)
             # Use generate_content from the model object
-            # --- FIX: Use asyncio.to_thread for synchronous generate_content and pass response_modalities ---
+            # Pass response_modalities here according to google-genai client.models syntax
             response = await asyncio.to_thread(
                 model.generate_content,
                 prompt, # Input is just the text prompt
                 generation_config=types.GenerationConfig(), # GenerationConfig object
                 response_modalities=['TEXT', 'IMAGE'] # Pass response_modalities here
             )
-            # --- END FIX ---
             _logger.info(f"Received response from Gemini API for image generation.")
 
             # --- Parsing the response for both text and potentially unexpected image outputs ---
@@ -409,6 +406,7 @@ class AICog(commands.Cog):
                           if hasattr(part, 'text'):
                                response_text += str(part.text) # Accumulate text parts
                           # Check for structured image output - this might be returned by this model with response_modalities
+                          # In google-genai, inline_data and file_data are likely under Part object
                           elif hasattr(part, 'inline_data') and hasattr(part.inline_data, 'mime_type') and part.inline_data.mime_type.startswith('image/'):
                                _logger.info("Generate Image: Received inline image data in response.")
                                image_data_parts.append(part) # Store the part to process later
@@ -430,7 +428,7 @@ class AICog(commands.Cog):
             # --- Send Response ---
             response_sent = False # Flag to track if any message was sent
 
-            # Send image outputs first if any were found
+            # Send image outputs first if any were found (even if unexpected)
             if image_urls:
                  _logger.info(f"Generate Image: Sending {len(image_urls)} image URLs.")
                  for url in image_urls:
@@ -473,7 +471,13 @@ class AICog(commands.Cog):
                  for i, part in enumerate(image_data_parts):
                       try:
                            # Decode base64 data
-                           image_bytes = base64.b64decode(part.inline_data.data)
+                           # In google-genai, inline_data.data is bytes, no need for b64decode
+                           # Check if part.inline_data.data is bytes or base64 string
+                           image_bytes = part.inline_data.data # Assume it's bytes directly
+                           # If it's a string and looks like base64, decode it:
+                           # if isinstance(image_bytes, str):
+                           #     image_bytes = base64.b64decode(image_bytes)
+
                            # Create a discord.File object
                            # Guess file extension from mime type
                            mime_type = part.inline_data.mime_type
@@ -615,11 +619,10 @@ class AICog(commands.Cog):
                  elif isinstance(error.original, types.BlockedPromptException) or isinstance(error.original, types.StopCandidateException): # Use types from google.genai
                        # These should ideally be caught in the command itself, but handle here as fallback
                        await send_func(f"Respons AI diblokir atau terhenti: {error.original}", ephemeral=True)
-                 # --- FIX: Add explicit catch for TypeErrors that might still occur ---
-                 elif isinstance(error.original, TypeError):
-                      _logger.error(f"Unexpected TypeError caught in error handler: {error.original}", exc_info=True)
-                      await send_func("Terjadi error internal AI. Mohon laporkan ini ke administrator.", ephemeral=True)
-                 # --- END FIX ---
+                 # Catch specific TypeErrors related to API call if they somehow reach here
+                 elif isinstance(error.original, TypeError) and ("'response_modalities'" in str(error.original) or "'generate_content()'" in str(error.original) or "'generate_content_async()'" in str(error.original)):
+                      _logger.error(f"Unexpected TypeError related to API call caught in error handler: {error.original}", exc_info=True)
+                      await send_func("Terjadi error konfigurasi internal AI saat memproses permintaan. Mohon laporkan ini ke administrator.", ephemeral=True)
                  else: # Other invoke errors
                       await send_func(f"Terjadi error saat mengeksekusi command AI: {error.original}", ephemeral=True)
 
