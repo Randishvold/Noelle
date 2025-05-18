@@ -511,7 +511,7 @@ class AICog(commands.Cog):
                                      await interaction.followup.send(header + chunk)
                                      _logger.debug(f"Sent accompanying text chunk {i+1}/{len(chunks)}.")
                                      response_sent = True
-                                except Exception as send_e:
+                               except Exception as send_e:
                                      _logger.error(f"Failed to send accompanying text chunk {i+1}/{len(chunks)}: {send_e}", exc_info=True)
                                      try:
                                           await interaction.channel.send(f"Gagal mengirim bagian teks pendamping {i+1} karena error: {send_e}") # Send in channel as followup might be limited
