@@ -344,13 +344,19 @@ class BasicCommandsCog(commands.Cog):
              return
         # Check if the bot has permission to kick the member (role hierarchy and actual permission)
         # We already have a check for bot's top role vs member's top role, but need to check bot's actual kick permission too
-        me = interaction.guild.me
-        if member.top_role >= me.top_role and interaction.user.id != interaction.guild.owner_id: # Owner can bypass bot's role hierarchy check
+        me = interaction.guild.me # Bot's member object in the guild
+        # Ensure the invoking user has higher role than the target member (unless they are owner)
+        if interaction.user.top_role <= member.top_role and interaction.user.id != interaction.guild.owner_id:
+            await interaction.response.send_message("Anda tidak bisa menendang anggota dengan peran yang sama atau lebih tinggi dari Anda.", ephemeral=True)
+            return
+        # Ensure the bot has higher role than the target member AND bot has kick permission
+        if member.top_role >= me.top_role:
              await interaction.response.send_message("Saya tidak bisa menendang anggota ini karena peran tertingginya sama atau lebih tinggi dari peran saya.", ephemeral=True)
              return
         if not me.guild_permissions.kick_members:
             await interaction.response.send_message("Saya tidak memiliki izin `Kick Members`.", ephemeral=True)
             return
+
 
         try:
             await interaction.response.defer(ephemeral=False) # Defer response first
@@ -400,7 +406,12 @@ class BasicCommandsCog(commands.Cog):
 
         # Check if the bot has permission to ban the member (role hierarchy and actual permission)
         me = interaction.guild.me
-        if member.top_role >= me.top_role and interaction.user.id != interaction.guild.owner_id: # Owner can bypass bot's role hierarchy check
+        # Ensure the invoking user has higher role than the target member (unless they are owner)
+        if interaction.user.top_role <= member.top_role and interaction.user.id != interaction.guild.owner_id:
+            await interaction.response.send_message("Anda tidak bisa memblokir anggota dengan peran yang sama atau lebih tinggi dari Anda.", ephemeral=True)
+            return
+        # Ensure the bot has higher role than the target member AND bot has ban permission
+        if member.top_role >= me.top_role:
             await interaction.response.send_message("Saya tidak bisa memblokir anggota ini karena peran tertingginya sama atau lebih tinggi dari peran saya.", ephemeral=True)
             return
         if not me.guild_permissions.ban_members:
