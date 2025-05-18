@@ -13,8 +13,8 @@ import re # Required for potential URL finding
 import base64 # Required for decoding inline image data
 # Import specific types and exceptions from genai.types
 import google.generativeai.types as genai_types
-# --- FIX: Import APIError from google.api_core.exceptions ---
-from google.api_core.exceptions import APIError # Import APIError from google.api_core
+# --- FIX: Import GoogleAPIError from google.api_core.exceptions ---
+from google.api_core.exceptions import GoogleAPIError # Import GoogleAPIError
 # --- END FIX ---
 
 # Configure logging
@@ -241,8 +241,8 @@ class AICog(commands.Cog):
                     except genai_types.StopCandidateException as e:
                          _logger.warning(f"Gemini response stopped prematurely in AI channel: {e}")
                          await message.reply("Maaf, respons AI terhenti di tengah jalan.")
-                    # --- FIX: Changed genai_types.APIError to APIError (imported from google.api_core.exceptions) ---
-                    except APIError as e: # Catches API errors from generate_content_async
+                    # --- FIX: Changed genai_types.APIError to GoogleAPIError (imported from google.api_core.exceptions) ---
+                    except GoogleAPIError as e: # Catches API errors from generate_content_async
                         _logger.error(f"Gemini API Error during AI channel processing (on_message): {e}", exc_info=True)
                         await message.reply(f"Terjadi error pada API AI: {e}")
                     # --- END FIX ---
@@ -320,8 +320,8 @@ class AICog(commands.Cog):
                  except genai_types.StopCandidateException as e:
                       _logger.warning(f"Gemini response stopped prematurely for mention: {e}")
                       await message.reply("Maaf, respons AI terhenti.")
-                 # --- FIX: Changed genai_types.APIError to APIError (imported from google.api_core.exceptions) ---
-                 except APIError as e:
+                 # --- FIX: Changed genai_types.APIError to GoogleAPIError (imported from google.api_core.exceptions) ---
+                 except GoogleAPIError as e:
                      _logger.error(f"Gemini API Error during mention processing: {e}", exc_info=True)
                      await message.reply(f"Terjadi error pada API AI: {e}")
                  # --- END FIX ---
@@ -348,20 +348,17 @@ class AICog(commands.Cog):
         ai_channel_id = config.get('ai_channel_id')
 
         # We check interaction.channel_id specifically, as interaction.channel is a TextChannel object
-        if ai_channel_id is None or interaction.channel_id != interaction.channel.id: # FIX: Changed interaction.channel.id != ai_channel_id to interaction.channel_id != interaction.channel.id? No, the original check was correct. Reverting.
-             # FIX: The original check was correct: check if the command's channel ID != the configured AI channel ID
-             if ai_channel_id is None or interaction.channel_id != ai_channel_id:
-                  # Get the channel object to mention it if possible
-                  ai_channel = self.bot.get_channel(ai_channel_id) if ai_channel_id else None
-                  channel_mention = ai_channel.mention if ai_channel else '`/config ai_channel` untuk mengaturnya'
+        if ai_channel_id is None or interaction.channel_id != ai_channel_id:
+             # Get the channel object to mention it if possible
+             ai_channel = self.bot.get_channel(ai_channel_id) if ai_channel_id else None
+             channel_mention = ai_channel.mention if ai_channel else '`/config ai_channel` untuk mengaturnya'
 
-                  await interaction.response.send_message(
-                      f"Command ini hanya bisa digunakan di channel AI yang sudah ditentukan. Silakan gunakan {channel_mention}.",
-                      ephemeral=True
-                  )
-                  _logger.warning(f"/generate_image used outside AI channel {ai_channel_id} by user {interaction.user.id} in channel {interaction.channel_id}.")
-                  return
-             # END FIX
+             await interaction.response.send_message(
+                 f"Command ini hanya bisa digunakan di channel AI yang sudah ditentukan. Silakan gunakan {channel_mention}.",
+                 ephemeral=True
+             )
+             _logger.warning(f"/generate_image used outside AI channel {ai_channel_id} by user {interaction.user.id} in channel {interaction.channel_id}.")
+             return
 
         # Ensure the image generation model is available
         model = self.flash_image_gen_model
@@ -513,8 +510,8 @@ class AICog(commands.Cog):
         except genai_types.StopCandidateException as e:
              _logger.warning(f"Gemini response stopped prematurely during image generation: {e}")
              await interaction.followup.send("Maaf, proses generate gambar terhenti di tengah jalan.")
-        # --- FIX: Changed genai_types.APIError to APIError (imported from google.api_core.exceptions) ---
-        except APIError as e:
+        # --- FIX: Changed genai_types.APIError to GoogleAPIError (imported from google.api_core.exceptions) ---
+        except GoogleAPIError as e:
             _logger.error(f"Gemini API Error during generate_image: {e}", exc_info=True)
             await interaction.followup.send(f"Terjadi error pada API AI saat generate gambar: {e}")
         # --- END FIX ---
@@ -560,7 +557,7 @@ class AICog(commands.Cog):
             elif isinstance(error, app_commands.CommandInvokeError):
                  _logger.error(f"CommandInvokeError in AI command: {error.original}", exc_info=error.original)
                  # Check if the original error is an APIError from Google
-                 if isinstance(error.original, APIError):
+                 if isinstance(error.original, GoogleAPIError): # FIX: Changed APIError to GoogleAPIError
                       await send_func(f"Terjadi error pada API AI: {error.original}", ephemeral=True)
                  elif isinstance(error.original, genai_types.BlockedPromptException) or isinstance(error.original, genai_types.StopCandidateException):
                        # These should ideally be caught in the command itself, but handle here as fallback
