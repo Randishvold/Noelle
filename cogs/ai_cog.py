@@ -1,8 +1,8 @@
 import discord
 import os
 # --- Import from google.genai ---
-import google.generativeai as genai # Use google.genai
-from google.generativeai import types # Import types from google.genai
+from google import genai
+from google.genai import types # Import types from google.genai
 # --- END FIX ---
 import database # Import database module
 # utils import dihilangkan jika tidak dipakai langsung di sini, tapi bisa ditambahkan jika perlu
