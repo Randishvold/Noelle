@@ -31,14 +31,17 @@ def format_date(dt: datetime.datetime):
 # --- Variable Definitions and Descriptions ---
 
 # Define the variable mapping (used by replace_variables)
-# Add user.avatar_url and ensure lambdas accept all context args
 _variable_mapping = {
     'user.name': lambda user=None, member=None, guild=None, channel=None: (user.name if user else member.name) if (user or member) else 'Unknown User',
     'user.tag': lambda user=None, member=None, guild=None, channel=None: (user.discriminator if user and user.discriminator != '0' else user.name if user else member.discriminator if member and member.discriminator != '0' else member.name if member else 'Unknown User') if (user or member) else 'Unknown User',
     'user.mention': lambda user=None, member=None, guild=None, channel=None: (user.mention if user else member.mention) if (user or member) else 'Unknown User',
     'user.id': lambda user=None, member=None, guild=None, channel=None: (user.id if user else member.id) if (user or member) else 'Unknown User',
     'user.created_at': lambda user=None, member=None, guild=None, channel=None: format_date((user.created_at if user else member.created_at)) if (user or member) else 'Unknown Date',
-    'user.avatar_url': lambda user=None, member=None, guild=None, channel=None: (user.avatar.url if user and user.avatar else member.avatar.url if member and member.avatar else '') if (user or member) else '', # Add user avatar URL
+    'user.avatar_url': lambda user=None, member=None, guild=None, channel=None: (user.avatar.url if user and user.avatar else member.avatar.url if member and member.avatar else '') if (user or member) else '',
+    'user.nickname': lambda user=None, member=None, guild=None, channel=None: (member.nick if member and member.nick is not None else (user.name if user else member.name)) if (user or member) else 'Unknown User', # <-- New variable logic: prefer member.nick
+    # Note: {user.nickname} requires a 'member' object context to work correctly.
+    # In interactions, interaction.user is also a member if in a guild.
+
 
     'server.name': lambda user=None, member=None, guild=None, channel=None: guild.name if guild else 'Unknown Server',
     'server.id': lambda user=None, member=None, guild=None, channel=None: guild.id if guild else 'Unknown Server',
@@ -51,14 +54,14 @@ _variable_mapping = {
 }
 
 # Define user-friendly descriptions for each variable
-# Add description for user.avatar_url
 VARIABLE_DESCRIPTIONS = {
-    'user.name': 'Nama pengguna (mis: NamaPengguna).',
-    'user.tag': 'Tag pengguna (mis: NamaPengguna#1234).',
+    'user.name': 'Nama pengguna global (mis: NamaPengguna).',
+    'user.tag': 'Tag pengguna (mis: NamaPengguna#1234).', # Still relevant for old style tags
     'user.mention': 'Mention pengguna (@NamaPengguna).',
     'user.id': 'ID unik pengguna.',
     'user.created_at': 'Waktu akun pengguna dibuat.',
     'user.avatar_url': 'URL gambar avatar pengguna.',
+    'user.nickname': 'Nama panggilan pengguna di server ini (prefer nickname, fallback ke username).', # <-- New variable description
 
     'server.name': 'Nama server Discord.',
     'server.id': 'ID unik server Discord.',
@@ -89,7 +92,6 @@ def replace_variables(text: str, user: discord.User = None, member: discord.Memb
         try:
             value_lambda = _variable_mapping.get(variable_name)
             if value_lambda:
-                # Pass all context arguments to the lambda
                 return str(value_lambda(user=user, member=member, guild=guild, channel=channel))
             else:
                  print(f"Warning: Unknown variable '{variable_name}' found in text.")
@@ -104,3 +106,14 @@ def replace_variables(text: str, user: discord.User = None, member: discord.Memb
     processed_text = pattern.sub(replacer, text)
 
     return processed_text
+
+# --- New Timestamp Function for Embed Footer ---
+
+def get_current_timestamp():
+    """Returns a Discord-compatible timestamp (datetime object in UTC)."""
+    # Discord automatically formats the timestamp when the embed object has a 'timestamp' field
+    # set to a timezone-aware datetime object (usually UTC).
+    # discord.py's Embed.from_dict and setting embed.timestamp handles this.
+    # We just need to return a datetime object if the user toggles timestamp ON.
+    # Note: This function isn't used for variable replacement {timestamp}, but for the embed's timestamp field.
+    return datetime.datetime.now(datetime.timezone.utc) # Get current time in UTC
