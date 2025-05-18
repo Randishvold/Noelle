@@ -861,7 +861,8 @@ class BasicCommandsCog(commands.Cog):
 
     # --- Error Handler for basic commands ---
     # This handler catches errors specifically for commands defined in THIS cog.
-    async def basic_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+    # --- FIX: Updated signature to accept 'binding' ---
+    async def basic_command_error(self, binding, interaction: discord.Interaction, error: app_commands.AppCommandError):
         """Error handler for basic commands."""
         # Ensure we can send a message even if interaction response is done
         send_func = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
@@ -875,7 +876,6 @@ class BasicCommandsCog(commands.Cog):
         elif isinstance(error, app_commands.CommandInvokeError):
              _logger.error(f"CommandInvokeError in basic command {interaction.command.name}: {error.original}", exc_info=error.original)
              # Log the traceback for CommandInvokeError's original exception
-             _logger.exception("Original exception for CommandInvokeError:", exc_info=error.original)
              await send_func(f"Terjadi error saat mengeksekusi perintah: {error.original}", ephemeral=True)
         elif isinstance(error, app_commands.TransformerError):
              _logger.warning(f"TransformerError in basic command {interaction.command.name}: {error.original}")
@@ -883,6 +883,7 @@ class BasicCommandsCog(commands.Cog):
         else:
             _logger.error(f"An unexpected error occurred in basic command {interaction.command.name}: {error}", exc_info=True)
             await send_func(f"Terjadi error tak terduga: {error}", ephemeral=True)
+    # --- END FIX ---
 
 
 # --- Setup function ---
@@ -900,7 +901,9 @@ async def setup(bot: commands.Bot):
     cog_instance.variables_slash.error(cog_instance.basic_command_error)
     cog_instance.pengumuman_slash.error(cog_instance.basic_command_error)
     cog_instance.kick_slash.error(cog_instance.basic_command_error)
-    cog_instance.ban_slash.error(cog_instance.basic_command_error) # FIX: Changed to cog_instance.basic_command_error
+    # --- FIX: Corrected typo and used instance method ---
+    cog_instance.ban_slash.error(cog_instance.basic_command_error)
+    # --- END FIX ---
     cog_instance.serverinfo_slash.error(cog_instance.basic_command_error)
     cog_instance.userinfo_slash.error(cog_instance.basic_command_error)
     cog_instance.addrole_slash.error(cog_instance.basic_command_error)

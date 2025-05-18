@@ -11,9 +11,14 @@ import io # Required for handling image bytes
 import asyncio # Required for async operations like sleep and typing
 import re # Required for potential URL finding
 import base64 # Required for decoding inline image data
-# Import specific exception types from genai.types
+# Import specific types and exceptions from genai.types
 import google.generativeai.types as genai_types
-
+# --- FIX: Import APIError directly from genai ---
+# No, based on the latest log, APIError is in genai.types
+# Let's confirm: BlockedPromptException, StopCandidateException are in genai.types
+# APIError also seems to be in genai.types based on the latest traceback attempt
+# Let's rely on genai_types for exceptions shown in its traceback.
+# from google.generativeai import APIError # <-- Removed this import, relying on genai_types
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
@@ -49,14 +54,7 @@ def initialize_gemini():
             _logger.error(f"Failed to initialize text/vision model 'gemini-2.0-flash': {e}", exc_info=True)
 
         # Initialize image generation model (for generate_image command)
-        # Check if this model name is available
         try:
-            # Optional check: list models to confirm name
-            # available_models = [m.name for m in genai.list_models()]
-            # if 'gemini-2.0-flash-preview-image-generation' not in available_models:
-            #      _logger.warning("'gemini-2.0-flash-preview-image-generation' model not listed as available.")
-            #      # Continue anyway, maybe it's available even if not listed widely yet
-
             _flash_image_gen_model = genai.GenerativeModel('gemini-2.0-flash-preview-image-generation')
             _logger.info("Initialized image generation model: gemini-2.0-flash-preview-image-generation")
         except Exception as e:
@@ -103,7 +101,7 @@ class AICog(commands.Cog):
 
         # Ensure at least the text model is initialized for on_message scenarios
         if self.flash_text_model is None:
-             # _logger.debug(f"Skipping on_message AI processing in guild {message.guild.id}: Text model not initialized.")
+             # _logger.debug(f"Skipping on_message AI processing for message in guild {message.guild.id}: Text model not initialized.")
              return # Silently ignore if text model is missing
 
         # Get server configuration
@@ -112,14 +110,16 @@ class AICog(commands.Cog):
 
         bot_user = self.bot.user
         is_mentioned = False
+        # Check if bot_user is not None and the mention string is actually in the message content
         if bot_user and bot_user.mention in message.content:
              is_mentioned = True # Simple check for mention presence
 
         # --- Scenario 1: Message is in the designated AI channel ---
+        # Check if this is the designated AI channel
         if ai_channel_id is not None and message.channel.id == ai_channel_id:
             # Check if it's just a bot mention in the AI channel - if so, let the mention scenario handle it below
-            if is_mentioned:
-                 _logger.debug(f"Message in AI channel {message.channel.id} is a bot mention. Letting mention scenario handle.")
+            if is_mentioned and message.content.strip() == bot_user.mention:
+                 _logger.debug(f"Message in AI channel {message.channel.id} is a bot mention-only. Letting mention scenario handle.")
                  pass # Continue to the mention check below
             else:
                 _logger.info(f"Processing AI channel message from {message.author.id} in guild {message.guild.name} ({message.guild.id}), channel {message.channel.name} ({message.channel.id}).")
@@ -160,6 +160,10 @@ class AICog(commands.Cog):
 
                         # Add text content
                         text_content = message.content.strip()
+                        # Remove bot mention if it's at the start (fallback for mentions in AI channel)
+                        if bot_user and text_content.startswith(bot_user.mention):
+                             text_content = text_content.replace(bot_user.mention, '', 1).strip()
+
                         if text_content:
                             content_parts.append(text_content)
                             _logger.info("Added text content to content parts for AI channel.")
@@ -240,9 +244,11 @@ class AICog(commands.Cog):
                     except genai_types.StopCandidateException as e:
                          _logger.warning(f"Gemini response stopped prematurely in AI channel: {e}")
                          await message.reply("Maaf, respons AI terhenti di tengah jalan.")
-                    except genai.APIError as e: # Catches API errors from generate_content_async
+                    # --- FIX: Changed genai.APIError to genai_types.APIError ---
+                    except genai_types.APIError as e: # Catches API errors from generate_content_async
                         _logger.error(f"Gemini API Error during AI channel processing (on_message): {e}", exc_info=True)
                         await message.reply(f"Terjadi error pada API AI: {e}")
+                    # --- END FIX ---
                     except Exception as e: # Catch any other unexpected errors during processing *before* sending
                         _logger.error(f"An unexpected error occurred during AI processing (AI channel on_message): {e}", exc_info=True)
                         await message.reply(f"Terjadi error tak terduga saat memproses permintaan AI: {e}")
@@ -251,21 +257,16 @@ class AICog(commands.Cog):
 
         # --- Scenario 2: Bot is mentioned (@NamaBot) in ANY channel (outside AI channel) ---
         # Check if the bot is mentioned and the message is NOT in the designated AI channel (or AI channel is not set)
-        # This check happens AFTER the AI channel check. If it's a mention *in* the AI channel,
-        # the AI channel scenario above processes it first if the message is not just a mention.
-        # If it's *only* a mention in the AI channel, it might fall through here, but the content_parts
-        # would be empty if no text/images are with the mention.
-        # Let's adjust this logic slightly: if message *starts* with mention OR is only mention, handle as mention scenario,
-        # UNLESS it's the designated AI channel and has other content (handled above).
-
-        # More robust check for mention-only or starts-with-mention outside AI channel
-        is_mention_only = bot_user and message.content.strip() == bot_user.mention
-        starts_with_mention = bot_user and message.content.strip().startswith(bot_user.mention)
-
-        if (is_mention_only or (starts_with_mention and not (ai_channel_id is not None and message.channel.id == ai_channel_id))) and self.flash_text_model:
-             # If it's a mention-only message OR starts with a mention AND is NOT in the AI channel (or AI channel not set)
-             # And the text model is available
+        # This check happens AFTER the AI channel check.
+        # This ensures mentions *in* the AI channel with other content are handled by Scenario 1.
+        # Mention-only messages in the AI channel *will* fall through to here.
+        if is_mentioned and (ai_channel_id is None or message.channel.id != ai_channel_id or message.content.strip() == bot_user.mention):
+             # If it's a mention (and not in AI channel) OR it's a mention-only message in the AI channel
              _logger.info(f"Processing bot mention message from {message.author.id} in guild {message.guild.name} ({message.guild.id}), channel {message.channel.name} ({message.channel.id}). (Mention Scenario)")
+
+             if self.flash_text_model is None:
+                  _logger.warning(f"Skipping mention response: Standard Flash model not initialized.")
+                  return # Silently skip if model is missing
 
              # Indicate that the bot is typing
              async with message.channel.typing():
@@ -322,9 +323,11 @@ class AICog(commands.Cog):
                  except genai_types.StopCandidateException as e:
                       _logger.warning(f"Gemini response stopped prematurely for mention: {e}")
                       await message.reply("Maaf, respons AI terhenti.")
-                 except genai.APIError as e:
+                 # --- FIX: Changed genai.APIError to genai_types.APIError ---
+                 except genai_types.APIError as e:
                      _logger.error(f"Gemini API Error during mention processing: {e}", exc_info=True)
                      await message.reply(f"Terjadi error pada API AI: {e}")
+                 # --- END FIX ---
                  except Exception as e:
                      _logger.error(f"An unexpected error occurred during mention processing: {e}", exc_info=True)
                      await message.reply(f"Terjadi error saat memproses permintaan AI: {e}")
@@ -364,7 +367,7 @@ class AICog(commands.Cog):
         model = self.flash_image_gen_model
         if model is None:
              _logger.warning(f"Skipping generate_image in guild {interaction.guild.id}: Image generation model not initialized.")
-             await interaction.response.send_message("Layanan AI untuk generate gambar tidak tersedia. Mohon hubungi administrator bot.", ephemeral=True)
+             await interaction.response.send_message("Layanan AI untuk generate gambar tidak tersedia. Model AI untuk generate gambar gagal diinisialisasi.", ephemeral=True)
              return
 
         if not prompt.strip():
@@ -379,9 +382,11 @@ class AICog(commands.Cog):
             # Call the image generation model with required config (ASYNC)
             response = await model.generate_content_async(
                  prompt, # Input is just the text prompt for generation
-                 generation_config=genai_types.GenerateContentConfig(
+                 # --- FIX: Changed GenerateContentConfig to GenerationConfig ---
+                 generation_config=genai_types.GenerationConfig(
                      response_modalities=['TEXT', 'IMAGE'] # Request both text and image output
                  )
+                 # --- END FIX ---
             )
             _logger.info(f"Received response from Gemini API for image generation.")
 
@@ -421,6 +426,7 @@ class AICog(commands.Cog):
             if image_urls:
                  _logger.info(f"Generate Image: Sending {len(image_urls)} image URLs.")
                  for url in image_urls:
+                     # Ensure the URL is valid format for embed image
                      if url and (url.lower().endswith('.png') or url.lower().endswith('.jpg') or url.lower().endswith('.jpeg') or url.lower().endswith('.gif') or url.lower().endswith('.webp')):
                           image_embed = discord.Embed(color=discord.Color.blue())
                           image_embed.set_image(url=url)
@@ -443,19 +449,27 @@ class AICog(commands.Cog):
                  await interaction.followup.send("Mendeteksi data gambar inline dalam respons. Mencoba mengirim sebagai file...")
                  for i, part in enumerate(image_data_parts):
                       try:
+                           # Decode base64 data
                            image_bytes = base64.b64decode(part.inline_data.data)
+                           # Create a discord.File object
+                           # Guess file extension from mime type
                            mime_type = part.inline_data.mime_type
-                           extension = mime_type.split('/')[-1] if '/' in mime_type else 'png'
+                           extension = mime_type.split('/')[-1] if '/' in mime_type else 'png' # Default to png
                            file_name = f"generated_image_{i+1}.{extension}"
+
                            discord_file = discord.File(io.BytesIO(image_bytes), filename=file_name)
+
+                           # Send the file
                            await interaction.followup.send(f"Gambar #{i+1}:", file=discord_file)
                            _logger.info(f"Successfully sent inline image data as file {file_name}.")
+
                       except Exception as file_e:
                            _logger.error(f"Failed to send inline image data part {i+1} as file: {file_e}", exc_info=True)
                            try:
                                await interaction.followup.send(f"Gagal mengirim gambar inline #{i+1}.")
                            except Exception as send_e:
                                 _logger.error(f"Failed to send error message for failed inline image file: {send_e}")
+
                       await asyncio.sleep(0.5)
 
 
@@ -475,8 +489,9 @@ class AICog(commands.Cog):
                                _logger.debug(f"Sent accompanying text chunk {i+1}/{len(chunks)}.")
                            except Exception as send_e:
                                 _logger.error(f"Failed to send accompanying text chunk {i+1}/{len(chunks)}: {send_e}", exc_info=True)
+                                # Attempt to send error message in channel if followup fails
                                 try:
-                                     await interaction.channel.send(f"Gagal mengirim bagian teks pendamping {i+1} karena error: {send_e}") # Send in channel as followup might be limited
+                                     await interaction.channel.send(f"Gagal mengirim bagian teks pendamping {i+1} karena error: {send_e}")
                                 except Exception as send_e_again:
                                      _logger.error(f"Failed to send error message for failed accompanying text chunk: {send_e_again}")
 
@@ -487,21 +502,25 @@ class AICog(commands.Cog):
 
 
             # If no image or text was generated but no block reason
-            if not image_urls and not image_data_parts and not response_text.strip():
-                 _logger.warning(f"Image generation command returned empty response with no block reason. Full response object: {response}")
-                 await interaction.followup.send("Gagal menghasilkan gambar. AI memberikan respons kosong.")
+            # This case is handled at the beginning of the 'Send Response' block.
+            # Adding an extra check here might be redundant but doesn't hurt.
+            # if not image_urls and not image_data_parts and not response_text.strip():
+            #      _logger.warning(f"Image generation command returned empty response with no block reason. Full response object: {response}")
+            #      await interaction.followup.send("Gagal menghasilkan gambar. AI memberikan respons kosong.")
 
 
         # --- Error Handling for generate_image command ---
         except genai_types.BlockedPromptException as e:
              _logger.warning(f"Generate Image prompt blocked by Gemini API: {e}")
-             await interaction.followup.send("Maaf, permintaan generate gambar ini melanggar kebijakan penggunaan AI dan tidak bisa diproses.")
+             await interaction.followup.send("Maaf, permintaan generate gambar ini diblokir oleh filter keamanan AI.")
         except genai_types.StopCandidateException as e:
              _logger.warning(f"Gemini response stopped prematurely during image generation: {e}")
              await interaction.followup.send("Maaf, proses generate gambar terhenti di tengah jalan.")
-        except genai.APIError as e:
+        # --- FIX: Changed genai.APIError to genai_types.APIError ---
+        except genai_types.APIError as e:
             _logger.error(f"Gemini API Error during generate_image: {e}", exc_info=True)
             await interaction.followup.send(f"Terjadi error pada API AI saat generate gambar: {e}")
+        # --- END FIX ---
         except Exception as e:
             _logger.error(f"An unexpected error occurred during image generation: {e}", exc_info=True)
             await interaction.followup.send(f"Terjadi error tak terduga saat mencoba generate gambar: {e}")
@@ -509,33 +528,53 @@ class AICog(commands.Cog):
 
     # --- Shared Error Handler for AI Cog Slash Commands ---
     # This handler catches errors specifically for slash commands defined in THIS cog (e.g., /generate_image).
-    async def ai_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+    # --- FIX: Updated signature to accept 'binding' ---
+    async def ai_command_error(self, binding, interaction: discord.Interaction, error: app_commands.AppCommandError):
         """Error handler for AI slash commands."""
+        _logger.error(f"Handling AI command error for command {interaction.command.name} by user {interaction.user.id} in guild {interaction.guild_id}.", exc_info=True) # Log handler start and traceback
+
         # Ensure we can send a message even if interaction response is done
         # For slash commands, followup is preferred after defer.
-        send_func = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
-
-        if isinstance(error, app_commands.CheckFailure): # Catches app_commands.guild_only or custom checks
-             _logger.warning(f"AI command check failed for user {interaction.user.id} on command {interaction.command.name}: {error}")
-             # The custom check for AI channel already sends a message, so avoid sending again here.
-             # If it's a guild_only check failure, send a generic message.
-             if "Command ini hanya bisa digunakan di server" in str(error): # Check if it's likely from guild_only()
-                 await send_func("Command ini hanya bisa digunakan di server.", ephemeral=True)
-             elif "channel AI yang sudah ditentukan" in str(error): # Check if it's from our custom channel check message
-                  # Message already sent by the check itself
-                  pass
-             else: # Other custom check failures
-                  await send_func(str(error), ephemeral=True)
-
-        elif isinstance(error, app_commands.CommandInvokeError):
-             _logger.error(f"CommandInvokeError in AI command {interaction.command.name}: {error.original}", exc_info=error.original)
-             await send_func(f"Terjadi error saat mengeksekusi command AI: {error.original}", ephemeral=True)
-        elif isinstance(error, app_commands.TransformerError):
-             _logger.warning(f"TransformerError in AI command {interaction.command.name}: {error.original}")
-             await send_func(f"Nilai tidak valid diberikan untuk argumen '{error.param_name}': {error.original}", ephemeral=True)
+        # Check if interaction is already responded
+        if interaction.response.is_done():
+            send_func = interaction.followup.send
+            _logger.debug("Interaction response is done, using followup.")
         else:
-            _logger.error(f"An unexpected error occurred in AI command {interaction.command.name}: {error}", exc_info=True)
-            await send_func(f"Terjadi error tak terduga: {error}", ephemeral=True)
+            send_func = interaction.response.send_message
+            _logger.debug("Interaction response is not done, using response.send_message.")
+            # If response is not done and it's a CommandInvokeError, defer first if not deferred already?
+            # No, send_message should work if not deferred. Deferring is usually done at command start.
+            # Just use send_message directly.
+
+        # Try to send the error message
+        try:
+            if isinstance(error, app_commands.CheckFailure): # Catches app_commands.guild_only or custom checks
+                 _logger.warning(f"AI command check failed: {error}")
+                 # The custom check for AI channel already sends a message, so avoid sending again here.
+                 # If it's a guild_only check failure, send a generic message.
+                 if "Command ini hanya bisa digunakan di server" in str(error): # Check if it's likely from guild_only()
+                     await send_func("Command ini hanya bisa digunakan di server.", ephemeral=True)
+                 elif "channel AI yang sudah ditentukan" in str(error): # Check if it's from our custom channel check message
+                      # Message already sent by the check itself in the command body
+                      pass # Do nothing, message already sent
+                 else: # Other custom check failures
+                      await send_func(f"Check command gagal: {str(error)}", ephemeral=True) # Include error message for clarity
+
+            elif isinstance(error, app_commands.CommandInvokeError):
+                 _logger.error(f"CommandInvokeError in AI command: {error.original}", exc_info=error.original)
+                 await send_func(f"Terjadi error saat mengeksekusi command AI: {error.original}", ephemeral=True)
+            elif isinstance(error, app_commands.TransformerError):
+                 _logger.warning(f"TransformerError in AI command: {error.original}")
+                 await send_func(f"Nilai tidak valid diberikan untuk argumen '{error.param_name}': {error.original}", ephemeral=True)
+            else:
+                _logger.error(f"An unexpected error occurred in AI command: {error}", exc_info=True)
+                await send_func(f"Terjadi error tak terduga: {error}", ephemeral=True)
+
+        except Exception as send_error_e:
+            _logger.error(f"Failed to send error message in AI command error handler: {send_error_e}", exc_info=True)
+            # As a last resort, print to console or send via raw channel send if interaction fails completely
+            print(f"FATAL ERROR in AI command handler for {interaction.command.name}: {error}. Also failed to send error message: {send_error_e}")
+    # --- END FIX ---
 
 
 # --- Setup function ---
