@@ -14,34 +14,48 @@ if not MONGO_URI:
     sys.exit(1)
 
 DATABASE_NAME = 'my_discord_bot_db'
-COLLECTION_NAME = 'custom_embeds'
+EMBEDS_COLLECTION_NAME = 'custom_embeds' # Name for embeds collection
+CONFIGS_COLLECTION_NAME = 'server_configs' # Name for configs collection
 
 _mongo_client = None
 _db = None
-_collection = None
+_embeds_collection = None
+_configs_collection = None # New global for configs collection
 
 def connect_to_mongo():
-    global _mongo_client, _db, _collection
+    global _mongo_client, _db, _embeds_collection, _configs_collection
     try:
         _mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         _mongo_client.admin.command('ismaster')
         print("MongoDB connection successful!")
-        _db = _mongo_client[DATABASE_NAME]
-        _collection = _db[COLLECTION_NAME]
 
+        _db = _mongo_client[DATABASE_NAME]
+        _embeds_collection = _db[EMBEDS_COLLECTION_NAME] # Assign to embed collection
+        _configs_collection = _db[CONFIGS_COLLECTION_NAME] # Assign to configs collection
+
+
+        # Ensure unique compound index on guild_id and embed_name for embeds
         try:
-            # Ensure unique compound index on guild_id and embed_name
-            # This prevents duplicate embed names within the same guild
-            # Note: MongoDB treats missing fields as null for indexing purposes.
-            # Our save logic below explicitly adds these fields to the document.
-            _collection.create_index(
+            _embeds_collection.create_index(
                 [("guild_id", 1), ("embed_name", 1)],
                 unique=True,
                 background=True
             )
-            print(f"Ensured unique index on {COLLECTION_NAME} collection.")
+            print(f"Ensured unique index on {EMBEDS_COLLECTION_NAME} collection.")
         except OperationFailure as e:
-            print(f"Could not create index (might already exist): {e}")
+            print(f"Could not create index on {EMBEDS_COLLECTION_NAME} (might already exist): {e}")
+
+        # Ensure unique index on guild_id for server_configs
+        try:
+            _configs_collection.create_index(
+                [("guild_id", 1)],
+                unique=True,
+                background=True
+            )
+            print(f"Ensured unique index on {CONFIGS_COLLECTION_NAME} collection.")
+        except OperationFailure as e:
+            print(f"Could not create index on {CONFIGS_COLLECTION_NAME} (might already exist): {e}")
+
 
     except ConnectionFailure as e:
         print(f"MongoDB connection failed: {e}")
@@ -53,47 +67,45 @@ def connect_to_mongo():
 
 connect_to_mongo()
 
-def get_collection():
-    if _collection is None:
-        print("Warning: MongoDB connection not established. Attempting to connect...")
-        connect_to_mongo()
-        if _collection is None:
-            raise ConnectionFailure("Failed to connect to MongoDB.")
-    return _collection
+# Helper to get collections
+def get_embeds_collection():
+     if _embeds_collection is None:
+         connect_to_mongo()
+         if _embeds_collection is None:
+              raise ConnectionFailure("Failed to connect to MongoDB and get embeds collection.")
+     return _embeds_collection
 
+def get_configs_collection():
+     if _configs_collection is None:
+         connect_to_mongo()
+         if _configs_collection is None:
+              raise ConnectionFailure("Failed to connect to MongoDB and get configs collection.")
+     return _configs_collection
+
+
+# --- Embed Database Operations (Modified to use get_embeds_collection) ---
 
 def save_custom_embed(guild_id: int, embed_name: str, embed_data: dict):
     """Saves or updates a custom embed in the database."""
-    collection = get_collection()
+    collection = get_embeds_collection() # Use embeds collection
     try:
-        # --- FIX: Ensure guild_id and embed_name are in the document data being saved ---
-        # This prevents implicit null values for the index on insert if these keys are missing from embed_data
-        # Make a copy to avoid modifying the original embed_data dictionary if it's used elsewhere
-        doc_to_save = embed_data.copy() if isinstance(embed_data, dict) else {} # Start with a copy or empty dict
+        doc_to_save = embed_data.copy() if isinstance(embed_data, dict) else {}
         doc_to_save['guild_id'] = guild_id
         doc_to_save['embed_name'] = embed_name
 
-        # print(f"Attempting to save document: {doc_to_save}") # Optional: for debugging the data being sent
-
         result = collection.replace_one(
-            # Filter still uses the correct parameters to find the document
             {'guild_id': guild_id, 'embed_name': embed_name},
-            doc_to_save, # Save the document with guild_id and embed_name explicitly included
-            upsert=True # Insert if document not found
+            doc_to_save,
+            upsert=True
         )
-        # print(f"Save result: Upserted ID: {result.upserted_id}, Modified Count: {result.modified_count}, Matched Count: {result.matched_count}") # Optional: log result
-
         return result.upserted_id or result.modified_count > 0
 
     except OperationFailure as e:
         print(f"MongoDB operation failed during save_custom_embed: {e}")
-        # Check if it's the specific duplicate key error we're seeing
         if e.code == 11000:
-             print("Specific E11000 duplicate key error detected. This likely means a document with guild_id=null and embed_name=null still exists or was created unexpectedly.")
-             # You might want to log the specific key causing the duplication from e.details
+             print(f"Specific E11000 duplicate key error detected for embed '{embed_name}' in guild {guild_id}.")
              if e.details and 'keyValue' in e.details:
                   print(f"Duplicate key value: {e.details['keyValue']}")
-
         return False
     except PyMongoError as e:
         print(f"An unexpected PyMongo error occurred during save_custom_embed: {e}")
@@ -102,7 +114,7 @@ def save_custom_embed(guild_id: int, embed_name: str, embed_data: dict):
 
 def get_custom_embed(guild_id: int, embed_name: str):
     """Retrieves a custom embed from the database."""
-    collection = get_collection()
+    collection = get_embeds_collection() # Use embeds collection
     try:
         embed_doc = collection.find_one({'guild_id': guild_id, 'embed_name': embed_name})
         return embed_doc
@@ -117,7 +129,7 @@ def get_custom_embed(guild_id: int, embed_name: str):
 
 def get_all_custom_embed_names(guild_id: int):
     """Retrieves the names of all custom embeds for a guild."""
-    collection = get_collection()
+    collection = get_embeds_collection() # Use embeds collection
     try:
         cursor = collection.find({'guild_id': guild_id}, {'embed_name': 1, '_id': 0})
         names = [doc['embed_name'] for doc in cursor if 'embed_name' in doc]
@@ -133,7 +145,7 @@ def get_all_custom_embed_names(guild_id: int):
 
 def delete_custom_embed(guild_id: int, embed_name: str):
     """Deletes a custom embed from the database."""
-    collection = get_collection()
+    collection = get_embeds_collection() # Use embeds collection
     try:
         result = collection.delete_one({'guild_id': guild_id, 'embed_name': embed_name})
         return result.deleted_count > 0
@@ -145,7 +157,65 @@ def delete_custom_embed(guild_id: int, embed_name: str):
         print(f"An unexpected PyMongo error occurred during delete_custom_embed: {e}")
         return False
 
+# --- Server Config Database Operations (NEW) ---
+
+# Default configuration for a new server
+DEFAULT_SERVER_CONFIG = {
+    'mod_roles': [], # List of role IDs that can use moderation commands (kick, ban, purge)
+    'role_manager_roles': [], # List of role IDs that can use role management commands (addrole, removerole)
+    # Add other default settings here later if needed
+}
+
+def get_server_config(guild_id: int):
+    """Retrieves the configuration for a server."""
+    collection = get_configs_collection() # Use configs collection
+    try:
+        config_doc = collection.find_one({'guild_id': guild_id})
+        # Return default config if not found, merging with default to ensure all keys exist
+        if config_doc:
+            # Merge stored config with default to ensure new default keys are present
+            merged_config = DEFAULT_SERVER_CONFIG.copy()
+            merged_config.update(config_doc)
+            # Remove _id before returning
+            if '_id' in merged_config:
+                del merged_config['_id']
+            return merged_config
+        else:
+            # Insert default config if not found, then return it
+            collection.insert_one({'guild_id': guild_id, **DEFAULT_SERVER_CONFIG}) # Use ** to unpack default dict
+            return DEFAULT_SERVER_CONFIG.copy() # Return a copy
+
+    except OperationFailure as e:
+        print(f"MongoDB operation failed during get_server_config: {e}")
+        return DEFAULT_SERVER_CONFIG.copy() # Return default on error
+    except PyMongoError as e:
+        print(f"An unexpected PyMongo error occurred during get_server_config: {e}")
+        return DEFAULT_SERVER_CONFIG.copy() # Return default on error
+
+
+def update_server_config(guild_id: int, settings_to_update: dict):
+    """Updates specific settings for a server configuration."""
+    collection = get_configs_collection() # Use configs collection
+    try:
+        # Use update_one with $set to update only specified fields, upsert=True to insert if not found
+        result = collection.update_one(
+            {'guild_id': guild_id},
+            {'$set': settings_to_update}, # Use $set to update only the keys in settings_to_update
+            upsert=True
+        )
+        return result.modified_count > 0 or result.upserted_id is not None # Return True if modified or inserted
+
+    except OperationFailure as e:
+        print(f"MongoDB operation failed during update_server_config: {e}")
+        return False
+    except PyMongoError as e:
+        print(f"An unexpected PyMongo error occurred during update_server_config: {e}")
+        return False
+
+
+# Function to close the connection (optional, connection pool manages)
 def close_mongo_connection():
+    """Closes the MongoDB client connection."""
     global _mongo_client
     if _mongo_client:
         _mongo_client.close()
