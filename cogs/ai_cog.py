@@ -1,4 +1,3 @@
---- START OF FILE cogs/ai_cog.py (FINAL REVISED) ---
 import discord
 import os
 import google.generativeai as genai
