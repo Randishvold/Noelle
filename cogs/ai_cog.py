@@ -241,7 +241,7 @@ class AICog(commands.Cog):
                     except genai_types.StopCandidateException as e:
                          _logger.warning(f"Gemini response stopped prematurely in AI channel: {e}")
                          await message.reply("Maaf, respons AI terhenti di tengah jalan.")
-                    # --- FIX: Changed genai_types.APIError to GoogleAPIError (imported from google.api_core.exceptions) ---
+                    # --- FIX: Changed genai.APIError to GoogleAPIError (imported from google.api_core.exceptions) ---
                     except GoogleAPIError as e: # Catches API errors from generate_content_async
                         _logger.error(f"Gemini API Error during AI channel processing (on_message): {e}", exc_info=True)
                         await message.reply(f"Terjadi error pada API AI: {e}")
@@ -376,51 +376,57 @@ class AICog(commands.Cog):
 
         try:
             _logger.info(f"Calling image generation model for prompt: '{prompt}'.")
-            # Call the image generation model with required config (ASYNC)
+            # Call the image generation model (ASYNC)
+            # --- FIX: Removed response_modalities parameter entirely ---
             response = await model.generate_content_async(
                  prompt, # Input is just the text prompt for generation
-                 generation_config=genai_types.GenerationConfig(), # GenerationConfig object (can add temperature etc. here)
-                 response_modalities=['TEXT', 'IMAGE'] # Pass response_modalities directly to generate_content_async
+                 generation_config=genai_types.GenerationConfig() # GenerationConfig object (can add temperature etc. here)
+                 # response_modalities=['TEXT', 'IMAGE'] # <-- This parameter is causing the TypeError and is removed
             )
+            # --- END FIX ---
             _logger.info(f"Received response from Gemini API for image generation.")
 
-            # --- Parsing the response for both text and image ---
+            # --- Parsing the response for both text and potentially unexpected image outputs ---
             response_text = "" # Accompanying text
             image_urls = [] # Collect image URLs if returned
             image_data_parts = [] # Collect inline image data parts if returned
 
             if hasattr(response, 'candidates') and response.candidates:
                  candidate = response.candidates[0]
+                 # Check if candidate has a valid finish_reason indicating success, but proceed if content parts exist
                  if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
                      for part in candidate.content.parts:
                           if hasattr(part, 'text'):
                                response_text += str(part.text) # Accumulate text parts
-                          # Check for structured image output
+                          # Check for structured image output - this might be unexpected from this call without modalities, but check anyway.
                           elif hasattr(part, 'inline_data') and hasattr(part.inline_data, 'mime_type') and part.inline_data.mime_type.startswith('image/'):
-                               _logger.info("Generate Image: Received inline image data in response.")
+                               _logger.warning("Generate Image: Unexpectedly received inline image data in response!")
                                image_data_parts.append(part) # Store the part to process later
                           elif hasattr(part, 'file_data') and hasattr(part.file_data, 'file_uri'):
-                               # API returned a file URI
+                               _logger.warning("Generate Image: Unexpectedly found file_uri in response!")
                                image_urls.append(part.file_data.file_uri)
-                               _logger.info(f"Generate Image: Found file_uri in response: {part.file_data.file_uri}")
+
+            # Also check accumulated response_text for markdown image links as a heuristic
+            # (Models sometimes generate markdown links instead of structured image output)
+            if response_text:
+                 markdown_image_pattern = r'!\[.*?\]\((https?://\S+\.(?:png|jpg|jpeg|gif|webp))\)'
+                 found_markdown_urls = re.findall(markdown_image_pattern, response_text)
+                 image_urls.extend(found_markdown_urls)
+                 if found_markdown_urls:
+                     _logger.info(f"Generate Image: Found markdown image URLs in text: {found_markdown_urls}")
+                     # Optionally, remove the markdown links from the text response if URLs are found
+                     # response_text = re.sub(markdown_image_pattern, '', response_text).strip()
 
             # --- Send Response ---
-            if not response_text.strip() and not image_urls and not image_data_parts:
-                 # Handle empty response or blocked prompt
-                 if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason != genai_types.content.BlockReason.BLOCK_REASON_UNSPECIFIED:
-                     block_reason = response.prompt_feedback.block_reason.name
-                     _logger.warning(f"Generate Image prompt blocked by Gemini safety filter. Reason: {block_reason}. Full feedback: {response.prompt_feedback}")
-                     await interaction.followup.send("Maaf, permintaan generate gambar ini diblokir oleh filter keamanan AI.")
-                 else:
-                    _logger.warning(f"Image generation model returned an empty response. Full response object: {response}")
-                    await interaction.followup.send("Gagal menghasilkan gambar. AI memberikan respons yang tidak terduga atau kosong.")
-                 return # Stop processing
+            # Prioritize sending images if found, then text.
+            # If neither is found and not blocked, report empty response.
 
-            # Send image outputs first
+            response_sent = False # Flag to track if any message was sent
+
+            # Send image outputs first if any were found (even if unexpected)
             if image_urls:
                  _logger.info(f"Generate Image: Sending {len(image_urls)} image URLs.")
                  for url in image_urls:
-                     # Ensure the URL is valid format for embed image
                      if url and (url.lower().endswith('.png') or url.lower().endswith('.jpg') or url.lower().endswith('.jpeg') or url.lower().endswith('.gif') or url.lower().endswith('.webp')):
                           image_embed = discord.Embed(color=discord.Color.blue())
                           image_embed.set_image(url=url)
@@ -429,18 +435,34 @@ class AICog(commands.Cog):
                           try:
                                await interaction.followup.send(embed=image_embed)
                                _logger.info(f"Sent image embed for URL: {url}")
+                               response_sent = True
                           except Exception as embed_e:
                                _logger.error(f"Failed to send image embed for URL {url}: {embed_e}", exc_info=True)
-                               await interaction.followup.send(f"URL Gambar yang Dihasilkan: {url}") # Fallback
+                               # Fallback to just sending the URL as text if embed fails
+                               try:
+                                    await interaction.followup.send(f"URL Gambar yang Dihasilkan: {url}")
+                                    response_sent = True
+                               except Exception as fallback_send_e:
+                                     _logger.error(f"Failed to send fallback image URL text: {fallback_send_e}", exc_info=True)
                      else:
                           _logger.warning(f"Skipping image embed for potential non-image URL: {url}")
-                          await interaction.followup.send(f"URL yang Ditemukan (mungkin bukan gambar): {url}")
+                          try:
+                               await interaction.followup.send(f"URL yang Ditemukan (mungkin bukan gambar): {url}")
+                               response_sent = True
+                          except Exception as send_e:
+                               _logger.error(f"Failed to send non-image URL text: {send_e}", exc_info=True)
                      await asyncio.sleep(0.5) # Small delay
 
             # Handle inline image data parts (requires sending as discord.File)
             if image_data_parts:
                  _logger.warning(f"Generate Image: Found {len(image_data_parts)} inline image data parts. Attempting to send as files.")
-                 await interaction.followup.send("Mendeteksi data gambar inline dalam respons. Mencoba mengirim sebagai file...")
+                 # Send a message indicating attempting to send files
+                 try:
+                      await interaction.followup.send("Mendeteksi data gambar inline dalam respons. Mencoba mengirim sebagai file...")
+                      response_sent = True
+                 except Exception as send_e:
+                      _logger.error(f"Failed to send inline data pending message: {send_e}", exc_info=True)
+
                  for i, part in enumerate(image_data_parts):
                       try:
                            # Decode base64 data
@@ -456,68 +478,100 @@ class AICog(commands.Cog):
                            # Send the file
                            await interaction.followup.send(f"Gambar #{i+1}:", file=discord_file)
                            _logger.info(f"Successfully sent inline image data as file {file_name}.")
-
+                           response_sent = True
                       except Exception as file_e:
                            _logger.error(f"Failed to send inline image data part {i+1} as file: {file_e}", exc_info=True)
                            try:
                                await interaction.followup.send(f"Gagal mengirim gambar inline #{i+1}.")
+                               response_sent = True
                            except Exception as send_e:
                                 _logger.error(f"Failed to send error message for failed inline image file: {send_e}")
-
                       await asyncio.sleep(0.5)
 
 
             # Send accompanying text response if any (after images)
             if response_text.strip():
-                 # For slash command response, we can just send the text directly
-                 # No need for chunking if sent via followup, Discord handles it better.
-                 # But check if the total response (including images) exceeds limits or if text alone is huge.
-                 # For safety, let's still chunk if the text alone is very long.
-                 if len(response_text) > 1990: # Use 1990 to be safe if combined with other things later
-                      _logger.info("Generate Image: Splitting accompanying text response into multiple messages (chunk size 1990).")
-                      chunks = [response_text[i:i+1990] for i in range(0, len(response_text), 1990)]
-                      for i, chunk in enumerate(chunks):
-                           header = f"(Teks Bagian {i+1}/{len(chunks)}):\n" if len(chunks) > 1 else "" # Differentiate from image parts
-                           try:
-                               await interaction.followup.send(header + chunk)
-                               _logger.debug(f"Sent accompanying text chunk {i+1}/{len(chunks)}.")
-                           except Exception as send_e:
-                                _logger.error(f"Failed to send accompanying text chunk {i+1}/{len(chunks)}: {send_e}", exc_info=True)
-                                # Attempt to send error message in channel if followup fails
+                 # For slash command response, we can just send the text directly via followup
+                 try:
+                      # Check if the text alone is too long (shouldn't happen often for accompanying text)
+                      if len(response_text) > 1990:
+                           _logger.warning(f"Generate Image: Accompanying text is very long ({len(response_text)}), chunking for safety.")
+                           chunks = [response_text[i:i+1990] for i in range(0, len(response_text), 1990)]
+                           for i, chunk in enumerate(chunks):
+                                header = f"(Teks Pendamping Bagian {i+1}/{len(chunks)}):\n" if len(chunks) > 1 else ""
                                 try:
-                                     await interaction.channel.send(f"Gagal mengirim bagian teks pendamping {i+1} karena error: {send_e}")
-                                except Exception as send_e_again:
-                                     _logger.error(f"Failed to send error message for failed accompanying text chunk: {send_e_again}")
+                                     await interaction.followup.send(header + chunk)
+                                     _logger.debug(f"Sent accompanying text chunk {i+1}/{len(chunks)}.")
+                                     response_sent = True
+                                except Exception as send_e:
+                                     _logger.error(f"Failed to send accompanying text chunk {i+1}/{len(chunks)}: {send_e}", exc_info=True)
+                                     try:
+                                          await interaction.channel.send(f"Gagal mengirim bagian teks pendamping {i+1} karena error: {send_e}") # Send in channel as followup might be limited
+                                     except Exception as send_e_again:
+                                          _logger.error(f"Failed to send error message for failed accompanying text chunk: {send_e_again}")
+                                await asyncio.sleep(0.5)
+                      else:
+                           await interaction.followup.send(response_text)
+                           _logger.info("Generate Image: Accompanying text response sent.")
+                           response_sent = True
 
-                           await asyncio.sleep(0.5)
+                 except Exception as send_e:
+                      _logger.error(f"Failed to send accompanying text response: {send_e}", exc_info=True)
+                      try:
+                          # Fallback to sending in channel if followup fails
+                          await interaction.channel.send(f"Terjadi error saat mengirim teks pendamping: {send_e}")
+                          response_sent = True
+                      except Exception as fallback_send_e:
+                          _logger.error(f"Failed to send fallback accompanying text in channel: {fallback_send_e}", exc_info=True)
+
+
+            # If nothing was sent (no text, no images) and not blocked
+            if not response_sent:
+                 if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason != genai_types.content.BlockReason.BLOCK_REASON_UNSPECIFIED:
+                     # This case is handled at the very start, but double check
+                     block_reason = response.prompt_feedback.block_reason.name
+                     _logger.warning(f"Generate Image prompt was blocked, but response_sent is false. Reason: {block_reason}. Full feedback: {response.prompt_feedback}")
+                     # Ensure a message is sent if not already
+                     try:
+                         await interaction.followup.send("Maaf, permintaan generate gambar ini diblokir oleh filter keamanan AI.")
+                     except Exception as send_e:
+                          _logger.error(f"Failed to send blocked message: {send_e}", exc_info=True)
+
                  else:
-                      await interaction.followup.send(response_text)
-                      _logger.info("Generate Image: Accompanying text response sent (single message).")
-
-
-            # If no image or text was generated but no block reason
-            # This case is handled at the beginning of the 'Send Response' block.
-            # Adding an extra check here might be redundant but doesn't hurt.
-            # if not image_urls and not image_data_parts and not response_text.strip():
-            #      _logger.warning(f"Image generation command returned empty response with no block reason. Full response object: {response}")
-            #      await interaction.followup.send("Gagal menghasilkan gambar. AI memberikan respons kosong.")
+                    _logger.warning(f"Image generation command returned empty response with no block reason. Full response object: {response}")
+                    try:
+                         await interaction.followup.send("Gagal menghasilkan gambar. AI memberikan respons yang tidak terduga atau kosong.")
+                    except Exception as send_e:
+                         _logger.error(f"Failed to send empty response message: {send_e}", exc_info=True)
 
 
         # --- Error Handling for generate_image command ---
         except genai_types.BlockedPromptException as e:
              _logger.warning(f"Generate Image prompt blocked by Gemini API: {e}")
-             await interaction.followup.send("Maaf, permintaan generate gambar ini diblokir oleh filter keamanan AI.")
+             try:
+                  await interaction.followup.send("Maaf, permintaan generate gambar ini melanggar kebijakan penggunaan AI dan tidak bisa diproses.")
+             except Exception as send_e:
+                  _logger.error(f"Failed to send BlockedPromptException message: {send_e}", exc_info=True)
         except genai_types.StopCandidateException as e:
              _logger.warning(f"Gemini response stopped prematurely during image generation: {e}")
-             await interaction.followup.send("Maaf, proses generate gambar terhenti di tengah jalan.")
-        # --- FIX: Changed genai_types.APIError to GoogleAPIError (imported from google.api_core.exceptions) ---
+             try:
+                  await interaction.followup.send("Maaf, proses generate gambar terhenti di tengah jalan.")
+             except Exception as send_e:
+                  _logger.error(f"Failed to send StopCandidateException message: {send_e}", exc_info=True)
+        # --- FIX: Catch GoogleAPIError ---
         except GoogleAPIError as e:
             _logger.error(f"Gemini API Error during generate_image: {e}", exc_info=True)
-            await interaction.followup.send(f"Terjadi error pada API AI saat generate gambar: {e}")
+            try:
+                 await interaction.followup.send(f"Terjadi error pada API AI saat generate gambar: {e}")
+            except Exception as send_e:
+                 _logger.error(f"Failed to send GoogleAPIError message: {send_e}", exc_info=True)
         # --- END FIX ---
         except Exception as e:
             _logger.error(f"An unexpected error occurred during image generation: {e}", exc_info=True)
-            await interaction.followup.send(f"Terjadi error tak terduga saat mencoba generate gambar: {e}")
+            try:
+                 await interaction.followup.send(f"Terjadi error tak terduga saat mencoba generate gambar: {e}")
+            except Exception as send_e:
+                 _logger.error(f"Failed to send unexpected Exception message: {send_e}", exc_info=True)
 
 
     # --- Shared Error Handler for AI Cog Slash Commands ---
@@ -536,9 +590,7 @@ class AICog(commands.Cog):
         else:
             send_func = interaction.response.send_message
             _logger.debug("Interaction response is not done, using response.send_message.")
-            # If response is not done and it's a CommandInvokeError, defer first if not deferred already?
-            # No, send_message should work if not deferred. Deferring is usually done at command start.
-            # Just use send_message directly.
+
 
         # Try to send the error message
         try:
@@ -556,12 +608,17 @@ class AICog(commands.Cog):
 
             elif isinstance(error, app_commands.CommandInvokeError):
                  _logger.error(f"CommandInvokeError in AI command: {error.original}", exc_info=error.original)
-                 # Check if the original error is an APIError from Google
+                 # Check if the original error is a GoogleAPIError or Gemini-specific exception
                  if isinstance(error.original, GoogleAPIError): # FIX: Changed APIError to GoogleAPIError
                       await send_func(f"Terjadi error pada API AI: {error.original}", ephemeral=True)
                  elif isinstance(error.original, genai_types.BlockedPromptException) or isinstance(error.original, genai_types.StopCandidateException):
                        # These should ideally be caught in the command itself, but handle here as fallback
                        await send_func(f"Respons AI diblokir atau terhenti: {error.original}", ephemeral=True)
+                 # --- FIX: Add explicit catch for the TypeError related to response_modalities if it somehow reaches here ---
+                 elif isinstance(error.original, TypeError) and "'response_modalities'" in str(error.original):
+                      _logger.error(f"Unexpected TypeError related to response_modalities caught in error handler: {error.original}", exc_info=True)
+                      await send_func("Terjadi error konfigurasi internal AI saat mencoba generate gambar. Mohon laporkan ini ke administrator.", ephemeral=True)
+                 # --- END FIX ---
                  else: # Other invoke errors
                       await send_func(f"Terjadi error saat mengeksekusi command AI: {error.original}", ephemeral=True)
 
