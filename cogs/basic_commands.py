@@ -900,7 +900,7 @@ async def setup(bot: commands.Bot):
     cog_instance.variables_slash.error(cog_instance.basic_command_error)
     cog_instance.pengumuman_slash.error(cog_instance.basic_command_error)
     cog_instance.kick_slash.error(cog_instance.basic_command_error)
-    cog_instance.ban_slash.error(cog_command_error) # FIX: Changed to cog_instance.basic_command_error
+    cog_instance.ban_slash.error(cog_instance.basic_command_error) # FIX: Changed to cog_instance.basic_command_error
     cog_instance.serverinfo_slash.error(cog_instance.basic_command_error)
     cog_instance.userinfo_slash.error(cog_instance.basic_command_error)
     cog_instance.addrole_slash.error(cog_instance.basic_command_error)
