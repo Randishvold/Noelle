@@ -31,13 +31,14 @@ def format_date(dt: datetime.datetime):
 # --- Variable Definitions and Descriptions ---
 
 # Define the variable mapping (used by replace_variables)
-# FIX: Modify all lambdas to accept all potential context arguments as optional keyword arguments
+# Add user.avatar_url and ensure lambdas accept all context args
 _variable_mapping = {
     'user.name': lambda user=None, member=None, guild=None, channel=None: (user.name if user else member.name) if (user or member) else 'Unknown User',
-    'user.tag': lambda user=None, member=None, guild=None, channel=None: (user.discriminator if user and user.discriminator != '0' else user.name if user else member.discriminator if member and member.discriminator != '0' else member.name if member else 'Unknown User') if (user or member) else 'Unknown User', # Handle new Discord username system
+    'user.tag': lambda user=None, member=None, guild=None, channel=None: (user.discriminator if user and user.discriminator != '0' else user.name if user else member.discriminator if member and member.discriminator != '0' else member.name if member else 'Unknown User') if (user or member) else 'Unknown User',
     'user.mention': lambda user=None, member=None, guild=None, channel=None: (user.mention if user else member.mention) if (user or member) else 'Unknown User',
     'user.id': lambda user=None, member=None, guild=None, channel=None: (user.id if user else member.id) if (user or member) else 'Unknown User',
     'user.created_at': lambda user=None, member=None, guild=None, channel=None: format_date((user.created_at if user else member.created_at)) if (user or member) else 'Unknown Date',
+    'user.avatar_url': lambda user=None, member=None, guild=None, channel=None: (user.avatar.url if user and user.avatar else member.avatar.url if member and member.avatar else '') if (user or member) else '', # Add user avatar URL
 
     'server.name': lambda user=None, member=None, guild=None, channel=None: guild.name if guild else 'Unknown Server',
     'server.id': lambda user=None, member=None, guild=None, channel=None: guild.id if guild else 'Unknown Server',
@@ -49,13 +50,15 @@ _variable_mapping = {
     'channel.mention': lambda user=None, member=None, guild=None, channel=None: channel.mention if channel else 'Unknown Channel',
 }
 
-# Define user-friendly descriptions (remains the same)
+# Define user-friendly descriptions for each variable
+# Add description for user.avatar_url
 VARIABLE_DESCRIPTIONS = {
     'user.name': 'Nama pengguna (mis: NamaPengguna).',
     'user.tag': 'Tag pengguna (mis: NamaPengguna#1234).',
     'user.mention': 'Mention pengguna (@NamaPengguna).',
     'user.id': 'ID unik pengguna.',
     'user.created_at': 'Waktu akun pengguna dibuat.',
+    'user.avatar_url': 'URL gambar avatar pengguna.',
 
     'server.name': 'Nama server Discord.',
     'server.id': 'ID unik server Discord.',
@@ -81,23 +84,20 @@ def replace_variables(text: str, user: discord.User = None, member: discord.Memb
     pattern = re.compile(r'\{(\w+\.\w+)\}')
 
     def replacer(match):
-        """Function to replace each matched variable pattern."""
         variable_name = match.group(1)
 
         try:
             value_lambda = _variable_mapping.get(variable_name)
             if value_lambda:
-                # FIX: Explicitly pass all context arguments to the lambda
+                # Pass all context arguments to the lambda
                 return str(value_lambda(user=user, member=member, guild=guild, channel=channel))
             else:
                  print(f"Warning: Unknown variable '{variable_name}' found in text.")
                  return match.group(0)
 
         except Exception as e:
-            # Log error and return error indicator
             desc = VARIABLE_DESCRIPTIONS.get(variable_name, "Unknown variable")
             print(f"Error replacing variable '{variable_name}': {e}")
-            # Include the variable name and description in the error output
             return f"{{error:{variable_name}: {desc}}}"
 
 

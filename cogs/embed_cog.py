@@ -2,23 +2,16 @@ import discord
 import os
 import sqlite3
 import json
-# Remove re, datetime import - they are now in utils
 from discord.ext import commands
 from discord import app_commands
-import discord.ui as ui # <-- FIX: Import discord.ui explicitly as ui
-import utils # Import utils from the project root
+import discord.ui as ui
+import utils
 
 # --- Database Setup ---
-# Path to the SQLite database file
-# Use a path relative to the script execution directory, which is now the project root due to sys.path
 DB_PATH = os.path.join('data', 'embeds.db')
-
-# Ensure the data directory exists when this module is loaded
-# This will create data/ relative to the project root
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 def init_db():
-    """Initializes the SQLite database and creates the table if it doesn't exist."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -32,13 +25,12 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db() # Initialize database when the cog is loaded
+init_db()
 
 # --- Database Helper Functions ---
-# (These remain the same, they use DB_PATH)
+# (save_custom_embed, get_custom_embed, get_all_custom_embed_names, delete_custom_embed remain the same)
 
 def save_custom_embed(guild_id: int, embed_name: str, embed_data: dict):
-    """Saves or updates a custom embed in the database."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -49,7 +41,6 @@ def save_custom_embed(guild_id: int, embed_name: str, embed_data: dict):
     conn.close()
 
 def get_custom_embed(guild_id: int, embed_name: str):
-    """Retrieves a custom embed from the database."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -63,7 +54,6 @@ def get_custom_embed(guild_id: int, embed_name: str):
     return None
 
 def get_all_custom_embed_names(guild_id: int):
-    """Retrieves the names of all custom embeds for a guild."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -75,7 +65,6 @@ def get_all_custom_embed_names(guild_id: int):
     return [row[0] for row in rows]
 
 def delete_custom_embed(guild_id: int, embed_name: str):
-    """Deletes a custom embed from the database."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -89,7 +78,6 @@ def delete_custom_embed(guild_id: int, embed_name: str):
 
 
 # --- Modal for Embed Input ---
-# ui.Modal and ui.TextInput are now correctly referenced via the imported 'ui' module
 
 class EmbedModal(ui.Modal, title='Edit Custom Embed'):
     """Modal for creating and editing embed data."""
@@ -98,6 +86,10 @@ class EmbedModal(ui.Modal, title='Edit Custom Embed'):
     embed_color = ui.TextInput(label='Color (Hex e.g. #RRGGBB)', style=discord.TextStyle.short, required=False, max_length=7, min_length=7)
     field1_name = ui.TextInput(label='Field 1 Name', style=discord.TextStyle.short, required=False, max_length=256)
     field1_value = ui.TextInput(label='Field 1 Value', style=discord.TextStyle.long, required=False)
+    # --- New Inputs for Author and Footer ---
+    author_name = ui.TextInput(label='Author Name', style=discord.TextStyle.short, required=False, max_length=256)
+    author_icon_url = ui.TextInput(label='Author Icon URL (optional)', style=discord.TextStyle.short, required=False)
+    footer_text = ui.TextInput(label='Footer Text', style=discord.TextStyle.short, required=False, max_length=2048) # Increased max length for footer
 
     def __init__(self, embed_name: str, existing_data: dict = None):
         super().__init__()
@@ -115,11 +107,20 @@ class EmbedModal(ui.Modal, title='Edit Custom Embed'):
             if fields and isinstance(fields, list) and len(fields) > 0:
                 if 'name' in fields[0]:
                     field_name_value = fields[0].get('name', '')
-                    # Ensure field name/value are strings before setting default
                     self.field1_name.default = str(field_name_value) if field_name_value is not None else ''
                 if 'value' in fields[0]:
                     field_value_value = fields[0].get('value', '')
                     self.field1_value.default = str(field_value_value) if field_value_value is not None else ''
+
+            # --- Pre-fill Author and Footer ---
+            author_data = existing_data.get('author')
+            if author_data and isinstance(author_data, dict):
+                 self.author_name.default = author_data.get('name', '')
+                 self.author_icon_url.default = author_data.get('icon_url', '') # Note: Use icon_url here
+
+            footer_data = existing_data.get('footer')
+            if footer_data and isinstance(footer_data, dict):
+                 self.footer_text.default = footer_data.get('text', '')
 
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -132,6 +133,11 @@ class EmbedModal(ui.Modal, title='Edit Custom Embed'):
         description = self.embed_description.value.strip() or None
         color_str = self.embed_color.value.strip()
         color = utils.get_color_int(color_str) if color_str else None
+
+        # --- Get Author and Footer Data from Inputs ---
+        author_name = self.author_name.value.strip() or None
+        author_icon_url = self.author_icon_url.value.strip() or None
+        footer_text = self.footer_text.value.strip() or None
 
         embed_data = {}
         if title:
@@ -147,12 +153,25 @@ class EmbedModal(ui.Modal, title='Edit Custom Embed'):
         if field1_name and field1_value:
              embed_data['fields'] = [{'name': field1_name, 'value': field1_value, 'inline': False}]
 
+        # --- Add Author and Footer to embed_data if not empty ---
+        if author_name: # Author requires at least a name
+             author_dict = {'name': author_name}
+             if author_icon_url:
+                 author_dict['icon_url'] = author_icon_url
+             embed_data['author'] = author_dict
+
+        if footer_text: # Footer requires at least text
+             footer_dict = {'text': footer_text}
+             footer_dict['timestamp'] = True # Add timestamp by default
+             embed_data['footer'] = footer_dict
+
+
         try:
             save_custom_embed(guild_id, self.embed_name, embed_data)
             action = "updated" if self.existing_data else "created"
             await interaction.response.send_message(
                 f"Custom embed '{self.embed_name}' {action} successfully!"
-                f"\nYou can use variables like {{user.mention}}, {{server.name}}, {{channel.name}}, etc."
+                f"\nYou can use variables like {{user.mention}}, {{server.name}}, {{channel.name}}, {{user.avatar_url}}, etc."
                 f"\nUse `/embed view {self.embed_name}` to preview."
                 , ephemeral=True)
 
@@ -185,20 +204,34 @@ class EmbedCog(commands.Cog):
                 try:
                     processed_embed_data = welcome_embed_data.copy()
 
-                    if 'title' in processed_embed_data and processed_embed_data['title']: # Check if title exists and is not empty
+                    # --- Process Variables in Author and Footer ---
+                    if 'author' in processed_embed_data and isinstance(processed_embed_data['author'], dict):
+                        if 'name' in processed_embed_data['author'] and processed_embed_data['author']['name']:
+                             processed_embed_data['author']['name'] = utils.replace_variables(processed_embed_data['author']['name'], member=member, guild=guild, channel=channel)
+                        if 'icon_url' in processed_embed_data['author'] and processed_embed_data['author']['icon_url']:
+                             processed_embed_data['author']['icon_url'] = utils.replace_variables(processed_embed_data['author']['icon_url'], member=member, guild=guild, channel=channel)
+
+                    if 'footer' in processed_embed_data and isinstance(processed_embed_data['footer'], dict):
+                        if 'text' in processed_embed_data['footer'] and processed_embed_data['footer']['text']:
+                             processed_embed_data['footer']['text'] = utils.replace_variables(processed_embed_data['footer']['text'], member=member, guild=guild, channel=channel)
+                        # Note: timestamp is boolean, no variable replacement needed
+
+                    # Process title, description, and fields for variables (existing logic)
+                    if 'title' in processed_embed_data and processed_embed_data['title']:
                         processed_embed_data['title'] = utils.replace_variables(processed_embed_data['title'], member=member, guild=guild, channel=channel)
-                    if 'description' in processed_embed_data and processed_embed_data['description']: # Check if description exists and is not empty
+                    if 'description' in processed_embed_data and processed_embed_data['description']:
                         processed_embed_data['description'] = utils.replace_variables(processed_embed_data['description'], member=member, guild=guild, channel=channel)
 
                     if 'fields' in processed_embed_data and isinstance(processed_embed_data['fields'], list):
                         for field in processed_embed_data['fields']:
-                            if 'name' in field and field['name']: # Check if name exists and is not empty
+                            if 'name' in field and field['name']:
                                 field['name'] = utils.replace_variables(field['name'], member=member, guild=guild, channel=channel)
-                            if 'value' in field and field['value']: # Check if value exists and is not empty
+                            if 'value' in field and field['value']:
                                 field['value'] = utils.replace_variables(field['value'], member=member, guild=guild, channel=channel)
 
                     embed = discord.Embed.from_dict(processed_embed_data)
 
+                    # Add user avatar as thumbnail if embed doesn't have one and user has avatar (existing logic)
                     if member.avatar and not embed.thumbnail:
                          embed.set_thumbnail(url=member.avatar.url)
 
@@ -290,6 +323,19 @@ class EmbedCog(commands.Cog):
         try:
             processed_embed_data = embed_data.copy()
 
+            # --- Process Variables in Author and Footer for View Command ---
+            if 'author' in processed_embed_data and isinstance(processed_embed_data['author'], dict):
+                if 'name' in processed_embed_data['author'] and processed_embed_data['author']['name']:
+                     processed_embed_data['author']['name'] = utils.replace_variables(processed_embed_data['author']['name'], user=interaction.user, guild=interaction.guild, channel=interaction.channel)
+                if 'icon_url' in processed_embed_data['author'] and processed_embed_data['author']['icon_url']:
+                     processed_embed_data['author']['icon_url'] = utils.replace_variables(processed_embed_data['author']['icon_url'], user=interaction.user, guild=interaction.guild, channel=interaction.channel)
+
+            if 'footer' in processed_embed_data and isinstance(processed_embed_data['footer'], dict):
+                if 'text' in processed_embed_data['footer'] and processed_embed_data['footer']['text']:
+                     processed_embed_data['footer']['text'] = utils.replace_variables(processed_embed_data['footer']['text'], user=interaction.user, guild=interaction.guild, channel=interaction.channel)
+                # Note: timestamp is boolean, no variable replacement needed
+
+            # Process title, description, and fields for variables (existing logic)
             if 'title' in processed_embed_data and processed_embed_data['title']:
                 processed_embed_data['title'] = utils.replace_variables(processed_embed_data['title'], user=interaction.user, guild=interaction.guild, channel=interaction.channel)
             if 'description' in processed_embed_data and processed_embed_data['description']:
