@@ -2,6 +2,7 @@ import discord
 import os
 import sqlite3
 import json
+import datetime # Import datetime explicitly here as we use datetime objects
 from discord.ext import commands
 from discord import app_commands
 import discord.ui as ui
@@ -33,10 +34,15 @@ init_db()
 def save_custom_embed(guild_id: int, embed_name: str, embed_data: dict):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    # Ensure timestamp is stored as boolean True/False, not datetime object string
+    # The default=str in json.dumps is okay if there are other datetime objects,
+    # but for the footer timestamp, we should store True/False.
+    # Let's ensure the data dictionary being passed here has timestamp as bool
+    # (This is handled in FooterEmbedModal's on_submit)
     cursor.execute('''
         INSERT OR REPLACE INTO custom_embeds (guild_id, embed_name, embed_data)
         VALUES (?, ?, ?)
-    ''', (guild_id, embed_name, json.dumps(embed_data, default=str))) # Added default=str for datetime
+    ''', (guild_id, embed_name, json.dumps(embed_data)))
     conn.commit()
     conn.close()
 
@@ -50,9 +56,6 @@ def get_custom_embed(guild_id: int, embed_name: str):
     row = cursor.fetchone()
     conn.close()
     if row:
-        # Deserialize JSON. Need to handle potential datetime string back to object if necessary,
-        # but Embed.from_dict usually handles standard ISO format strings.
-        # Let's rely on from_dict for now. If issues arise, might need custom deserialization.
         return json.loads(row[0])
     return None
 
@@ -85,7 +88,6 @@ def create_processed_embed(embed_data: dict, user: discord.User = None, member: 
     if not embed_data:
         return discord.Embed(title="Empty Embed", description="This embed has no content yet.", color=discord.Color.light_gray())
 
-    # Make a copy to avoid modifying the stored data
     processed_data = embed_data.copy()
 
     # Process Variables in Author
@@ -99,10 +101,8 @@ def create_processed_embed(embed_data: dict, user: discord.User = None, member: 
     if 'footer' in processed_data and isinstance(processed_data['footer'], dict):
         if 'text' in processed_data['footer'] and processed_data['footer']['text']:
              processed_data['footer']['text'] = utils.replace_variables(processed_data['footer']['text'], user=user, member=member, guild=guild, channel=channel)
-        # The 'timestamp' key in footer_dict should be a boolean (True/False) in stored data,
-        # not a datetime object string. We add it as True/False in modal submit.
-        # We don't process variables on the timestamp *value* itself, only the text.
-
+        # The 'timestamp' key in footer_dict should be a boolean (True/False) in stored data.
+        # We handle setting the embed's timestamp field below if it's True.
 
     # Process title, description, and fields for variables
     if 'title' in processed_data and processed_data['title']:
@@ -114,7 +114,7 @@ def create_processed_embed(embed_data: dict, user: discord.User = None, member: 
     if 'fields' in processed_data and isinstance(processed_data['fields'], list):
         processed_fields = []
         for field in processed_data['fields']:
-            processed_field = field.copy() # Copy the field dictionary
+            processed_field = field.copy()
             if 'name' in processed_field and processed_field['name']:
                 processed_field['name'] = utils.replace_variables(processed_field['name'], user=user, member=member, guild=guild, channel=channel)
             if 'value' in processed_field and processed_field['value']:
@@ -122,25 +122,39 @@ def create_processed_embed(embed_data: dict, user: discord.User = None, member: 
             if 'inline' not in processed_field:
                 processed_field['inline'] = False
             processed_fields.append(processed_field)
-        processed_data['fields'] = processed_fields # Replace original fields list
+        processed_data['fields'] = processed_fields
 
-    # Handle color - convert from int to discord.Color object during Embed creation
-    # Handle timestamp field - ensure it's a datetime object if True in processed_data
-    if 'footer' in processed_data and isinstance(processed_data['footer'], dict):
-        if processed_data['footer'].get('timestamp') is True:
-             # If timestamp is True in stored data, set the embed's timestamp field to the current time
-             # This is how Discord displays the "ago" timestamp
-             processed_data['timestamp'] = utils.get_current_timestamp()
-        elif 'timestamp' in processed_data: # If timestamp was False or not boolean, and exists in processed_data
-             del processed_data['timestamp'] # Remove it so Discord doesn't display it
+    # --- Handle timestamp for Embed.from_dict ---
+    # Check if the *stored* data indicated timestamp should be added
+    should_add_timestamp = processed_data.get('footer', {}).get('timestamp') is True
+
+    # Remove the boolean 'timestamp' key from the footer dict before creating the embed
+    # This prevents discord.Embed.from_dict from trying to interpret the boolean as part of footer data
+    # Make a copy of footer dict if it exists to avoid modifying processed_data directly
+    processed_footer = processed_data.get('footer', {}).copy()
+    if 'timestamp' in processed_footer:
+         del processed_footer['timestamp']
+
+    # Update processed_data with the cleaned footer (if footer exists)
+    if 'footer' in processed_data:
+         processed_data['footer'] = processed_footer
+
+    # Now, add the actual datetime object (or its string) to the *top level* of processed_data
+    # ONLY if should_add_timestamp is True.
+    # Let's add the ISO format string for compatibility with from_dict as documented.
+    if should_add_timestamp:
+        processed_data['timestamp'] = datetime.datetime.now(datetime.timezone.utc).isoformat() # <-- FIX: Add as ISO string
 
 
     try:
+        # Create a discord.Embed object from the processed dictionary data
+        # This dictionary now has a top-level 'timestamp' key with an ISO string if enabled
         embed = discord.Embed.from_dict(processed_data)
         return embed
     except Exception as e:
         print(f"Error creating embed object from processed data: {e}")
         print(f"Problematic embed data: {processed_data}")
+        # Ensure this fallback also uses a valid color
         return discord.Embed(title="Embed Creation Error", description=f"Could not create embed: {e}", color=discord.Color.red())
 
 
@@ -232,26 +246,22 @@ class AuthorEmbedModal(ui.Modal, title='Edit Embed Author'):
 
 # --- Footer Embed Modal (Modified) ---
 class FooterEmbedModal(ui.Modal, title='Edit Embed Footer'):
-    """Modal for editing embed footer info: text, timestamp toggle."""
     footer_text = ui.TextInput(label='Footer Text', style=discord.TextStyle.short, required=False, max_length=2048)
-    # New: Input for timestamp toggle
     add_timestamp = ui.TextInput(label='Add Timestamp? (yes/no)', style=discord.TextStyle.short, required=False, max_length=3)
 
     def __init__(self, embed_name: str, guild_id: int, initial_data: dict = None):
         super().__init__()
         self.embed_name = embed_name
         self.guild_id = guild_id
-        # Store initial data to pre-fill
         if initial_data and 'footer' in initial_data and isinstance(initial_data['footer'], dict):
              self.footer_text.default = initial_data['footer'].get('text', '')
-             # Pre-fill timestamp toggle
-             timestamp_enabled = initial_data['footer'].get('timestamp', False) # Default to False
-             self.add_timestamp.default = 'yes' if timestamp_enabled else 'no' # Pre-fill with 'yes' or 'no'
+             # Pre-fill timestamp toggle based on boolean value
+             timestamp_enabled = initial_data['footer'].get('timestamp', False)
+             self.add_timestamp.default = 'yes' if timestamp_enabled else 'no'
 
     async def on_submit(self, interaction: discord.Interaction):
         current_data = get_custom_embed(self.guild_id, self.embed_name) or {}
 
-        # Get data from modal inputs
         footer_text = self.footer_text.value.strip() or None
         add_timestamp_input = self.add_timestamp.value.strip().lower()
 
@@ -259,14 +269,13 @@ class FooterEmbedModal(ui.Modal, title='Edit Embed Footer'):
         timestamp_enabled = add_timestamp_input == 'yes'
 
         # Update current data
-        if footer_text: # Footer requires at least text
+        if footer_text:
              footer_dict = {'text': footer_text}
-             # Add timestamp boolean based on user input
-             footer_dict['timestamp'] = timestamp_enabled
+             # Store the boolean value for timestamp in the footer dict
+             footer_dict['timestamp'] = timestamp_enabled # <-- Store True/False here
              current_data['footer'] = footer_dict
-        elif 'footer' in current_data: # Remove footer if text input is empty and it existed before
+        elif 'footer' in current_data:
              del current_data['footer']
-        # If footer_text is empty and timestamp_enabled is False, nothing changes or footer is removed
 
         save_custom_embed(self.guild_id, self.embed_name, current_data)
 
@@ -290,7 +299,6 @@ class EmbedEditView(ui.View):
         for item in self.children:
             item.disabled = True
         print(f"View for embed '{self.embed_name}' timed out.")
-        # Consider editing the message to remove the view explicitly if desired
 
     @ui.button(label='Edit Basic Info', style=discord.ButtonStyle.primary)
     async def edit_basic_button(self, interaction: discord.Interaction, button: ui.Button):
@@ -312,7 +320,7 @@ class EmbedEditView(ui.View):
 
 
 # --- Embed Cog Class ---
-# (EmbedCog remains the same, it uses create_processed_embed and EmbedEditView)
+# (EmbedCog remains the same)
 
 class EmbedCog(commands.Cog):
     """Cog for managing custom server embeds and using them."""
@@ -372,7 +380,7 @@ class EmbedCog(commands.Cog):
 
         await interaction.response.send_message(
             f"Editing embed '{name}'. Use the buttons below to modify different parts."
-            f"\nVariables like {{user.mention}}, {{server.name}}, {{channel.name}}, {{user.avatar_url}}, {{user.nickname}} are supported." # Added nickname to message
+            f"\nVariables like {{user.mention}}, {{server.name}}, {{channel.name}}, {{user.avatar_url}}, {{user.nickname}} are supported."
             , embed=preview_embed, view=edit_view, ephemeral=True
         )
 
@@ -395,7 +403,7 @@ class EmbedCog(commands.Cog):
 
         await interaction.response.send_message(
             f"Editing embed '{name}'. Use the buttons below to modify different parts."
-            f"\nVariables like {{user.mention}}, {{server.name}}, {{channel.name}}, {{user.avatar_url}}, {{user.nickname}} are supported." # Added nickname to message
+            f"\nVariables like {{user.mention}}, {{server.name}}, {{channel.name}}, {{user.avatar_url}}, {{user.nickname}} are supported."
              , embed=preview_embed, view=edit_view, ephemeral=True
         )
 
@@ -439,7 +447,7 @@ class EmbedCog(commands.Cog):
             await interaction.response.send_message("Preview:", embed=embed)
         except Exception as e:
             print(f"Error creating embed from data for view: {e}")
-            print(f"Problematic embed data: {embed_data}") # Print original data for context
+            print(f"Problematic embed data: {embed_data}")
             await interaction.response.send_message(f"Could not create embed from data for '{name}'. Check bot logs for details.", ephemeral=True)
 
 
