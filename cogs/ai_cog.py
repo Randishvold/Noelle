@@ -245,16 +245,19 @@ class AICog(commands.Cog):
 
         try:
             _logger.info(f"Memanggil model gambar Gemini dengan prompt: '{prompt}'.")
-            generation_config = genai_types.GenerateContentConfig(
+            
+            # --- PERBAIKAN NAMA VARIABEL DAN ARGUMEN ---
+            # Buat objek GenerationConfig
+            generation_config_object = genai_types.GenerateContentConfig(
                 response_modalities=[genai_types.Modality.TEXT, genai_types.Modality.IMAGE]
             )
 
-            # --- PERBAIKAN PEMANGGILAN API ---
+            # Panggil API dengan argumen 'config' yang benar
             api_response = await asyncio.to_thread(
-                _gemini_client.models.generate_content,      # Panggil dari client.models
-                model=GEMINI_IMAGE_GEN_MODEL_NAME,         # Sebutkan nama model
-                contents=prompt,
-                generation_config=generation_config
+                _gemini_client.models.generate_content,
+                model=GEMINI_IMAGE_GEN_MODEL_NAME,
+                contents=prompt, # Untuk text-to-image, 'contents' adalah prompt string
+                config=generation_config_object # Argumen yang benar adalah 'config'
             )
             # --- AKHIR PERBAIKAN ---
             _logger.info("Menerima respons dari API gambar Gemini.")
@@ -273,7 +276,8 @@ class AICog(commands.Cog):
                             generated_image_bytes = part.inline_data.data
                             mime_type_image = part.inline_data.mime_type
                             _logger.info(f"Menerima inline_data gambar (MIME: {mime_type_image}).")
-                            # break # Ambil gambar pertama saja
+                            # Ambil gambar pertama yang valid
+                            # break # Jika hanya ingin satu gambar, bisa di-break di sini
             
             final_text_response = "\n".join(generated_text_parts).strip()
 
@@ -284,17 +288,19 @@ class AICog(commands.Cog):
                 
                 embed_desc = f"**Prompt:** \"{discord.utils.escape_markdown(prompt[:1000])}{'...' if len(prompt) > 1000 else ''}\""
                 if final_text_response:
+                    # Batasi panjang teks pendamping di embed agar tidak terlalu panjang
                     embed_desc += f"\n\n**AI:** {final_text_response[:1000]}{'...' if len(final_text_response) > 1000 else ''}"
                 
                 embed = discord.Embed(title="Gambar Dihasilkan oleh Gemini ✨", description=embed_desc, color=discord.Color.random())
                 embed.set_image(url=f"attachment://{filename}")
                 embed.set_footer(text=f"Diminta oleh: {interaction.user.display_name}")
+                
                 await interaction.followup.send(embed=embed, file=image_file)
+                _logger.info(f"Gambar dan teks pendamping (jika ada) berhasil dikirim untuk prompt: {prompt}")
             elif final_text_response:
-                _logger.warning(f"Gemini menghasilkan teks tapi tidak ada gambar. Prompt: '{prompt}'")
+                _logger.warning(f"Gemini menghasilkan teks tetapi tidak ada data gambar. Prompt: '{prompt}'")
                 await interaction.followup.send(f"AI merespons (tanpa gambar):\n\n{final_text_response}")
             else:
-                # Cek feedback jika respons kosong karena diblokir
                 if hasattr(api_response, 'prompt_feedback') and api_response.prompt_feedback:
                     block_reason_value = api_response.prompt_feedback.block_reason
                     if block_reason_value != genai_types.BlockedReason.BLOCKED_REASON_UNSPECIFIED:
@@ -306,9 +312,8 @@ class AICog(commands.Cog):
                         await interaction.followup.send(f"Maaf, permintaan gambar Anda diblokir ({block_reason_name}).")
                         return
                 _logger.warning(f"Gemini mengembalikan respons kosong untuk gambar. Prompt: '{prompt}'. Resp: {api_response}")
-                await interaction.followup.send("Gagal menghasilkan gambar. AI memberikan respons kosong atau tidak terduga.")
+                await interaction.followup.send("Gagal menghasilkan gambar. AI memberikan respons yang tidak terduga atau kosong.")
 
-        # Hapus penangkapan BlockedPromptError/StopCandidateError karena tidak ada di genai_types
         except (InvalidArgument, FailedPrecondition) as specific_api_e:
             _logger.warning(f"Error API spesifik Google (kemungkinan terkait safety/prompt) saat generate gambar: {specific_api_e}. Prompt: '{prompt}'")
             await interaction.followup.send(f"Permintaan Anda tidak dapat diproses oleh AI: {specific_api_e}", ephemeral=True)
@@ -317,7 +322,7 @@ class AICog(commands.Cog):
             await interaction.followup.send(f"Terjadi error pada API AI: {api_e}", ephemeral=True)
         except Exception as e:
             _logger.error(f"Error tak terduga saat generate gambar: {e}. Prompt: '{prompt}'", exc_info=True)
-            await interaction.followup.send("Terjadi error tak terduga saat membuat gambar.", ephemeral=True)
+            await interaction.followup.send(f"Terjadi error tak terduga saat membuat gambar: {type(e).__name__} - {e}", ephemeral=True) # Tampilkan tipe error juga
 
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         original_error = getattr(error, 'original', error)
