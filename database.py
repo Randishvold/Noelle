@@ -3,9 +3,10 @@ from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import ConnectionFailure, OperationFailure, PyMongoError
 import urllib.parse
 import sys
+from dotenv import load_dotenv
 
 # --- MongoDB Connection ---
-
+load_dotenv()
 MONGO_URI = os.getenv('MONGODB_URI')
 
 if not MONGO_URI:

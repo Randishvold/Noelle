@@ -13,10 +13,12 @@ from PIL import Image # Diperlukan jika Anda memproses gambar input
 import io
 import asyncio
 import re # Untuk mencari pemisah kalimat/paragraf
+from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
 _logger = logging.getLogger(__name__)
 
+load_dotenv()
 GEMINI_TEXT_MODEL_NAME = "models/gemini-2.0-flash"
 GEMINI_IMAGE_GEN_MODEL_NAME = "models/gemini-2.0-flash-preview-image-generation"
 
