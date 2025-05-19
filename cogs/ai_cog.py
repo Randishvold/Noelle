@@ -12,24 +12,23 @@ import logging
 from PIL import Image
 import io
 import asyncio
-import re # Untuk parsing URL fallback (meskipun kurang utama untuk Gemini image gen)
+import re
 
 # Konfigurasi logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
 _logger = logging.getLogger(__name__)
 
 # --- Konstanta Model ---
-# Nama model sesuai permintaan pengguna dan praktik umum
-GEMINI_TEXT_MODEL_NAME = "gemini-2.0-flash"
-GEMINI_IMAGE_GEN_MODEL_NAME = "gemini-2.0-flash-preview-image-generation"
+GEMINI_TEXT_MODEL_NAME = "models/gemini-2.0-flash"  # Pastikan menyertakan prefix 'models/' jika diperlukan oleh SDK
+GEMINI_IMAGE_GEN_MODEL_NAME = "models/gemini-2.0-flash-preview-image-generation" # Pastikan menyertakan prefix 'models/'
 
 # --- Kunci API ---
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 
 # --- Inisialisasi Klien dan Model Google AI ---
 _gemini_client: genai.Client | None = None
-_gemini_text_model: genai_types.Model | None = None
-_gemini_image_gen_model: genai_types.Model | None = None
+_gemini_text_model: genai_types.Model | None = None # Seharusnya genai.models.Model, namun genai_types.Model juga ada
+_gemini_image_gen_model: genai_types.Model | None = None # genai.models.Model
 
 def initialize_gemini_models():
     """
@@ -48,7 +47,9 @@ def initialize_gemini_models():
 
         # Dapatkan model untuk teks/multimodal umum
         try:
-            _gemini_text_model = _gemini_client.models.get(GEMINI_TEXT_MODEL_NAME)
+            # --- PERBAIKAN DI SINI ---
+            _gemini_text_model = _gemini_client.models.get(model=GEMINI_TEXT_MODEL_NAME)
+            # --- AKHIR PERBAIKAN ---
             _logger.info(f"Objek model berhasil didapatkan: {GEMINI_TEXT_MODEL_NAME}")
         except Exception as e:
             _logger.error(f"Gagal mendapatkan objek model '{GEMINI_TEXT_MODEL_NAME}': {e}", exc_info=True)
@@ -56,7 +57,9 @@ def initialize_gemini_models():
 
         # Dapatkan model untuk generasi gambar
         try:
-            _gemini_image_gen_model = _gemini_client.models.get(GEMINI_IMAGE_GEN_MODEL_NAME)
+            # --- PERBAIKAN DI SINI ---
+            _gemini_image_gen_model = _gemini_client.models.get(model=GEMINI_IMAGE_GEN_MODEL_NAME)
+            # --- AKHIR PERBAIKAN ---
             _logger.info(f"Objek model berhasil didapatkan: {GEMINI_IMAGE_GEN_MODEL_NAME}")
         except Exception as e:
             _logger.error(f"Gagal mendapatkan objek model '{GEMINI_IMAGE_GEN_MODEL_NAME}': {e}", exc_info=True)
@@ -97,18 +100,31 @@ class AICog(commands.Cog):
         Konteks digunakan untuk logging.
         """
         response_text = ""
-        if hasattr(response, 'text') and response.text: # Cara termudah mendapatkan teks jika model langsung memberikannya
+        # Coba akses response.text secara langsung dulu, ini sering ada di respons sederhana
+        if hasattr(response, 'text') and response.text:
             response_text = response.text
+        # Jika tidak ada, iterasi candidates dan parts
         elif hasattr(response, 'candidates') and response.candidates:
             candidate = response.candidates[0]
             if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                response_text = "".join(part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text)
+                # Gabungkan semua bagian teks
+                text_parts_list = [part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text]
+                response_text = "".join(text_parts_list)
+            # Fallback jika struktur sedikit berbeda tapi ada candidate.text
+            elif hasattr(candidate, 'text') and candidate.text:
+                response_text = candidate.text
 
         if not response_text.strip():
             # Cek feedback jika respons kosong karena diblokir
             if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
-                if response.prompt_feedback.block_reason != genai_types.HarmBlockThreshold.HARM_BLOCK_THRESHOLD_UNSPECIFIED: # Menggunakan konstanta enum yang benar
-                    block_reason_name = genai_types.BlockedReason(response.prompt_feedback.block_reason).name
+                # Akses block_reason melalui prompt_feedback
+                block_reason_value = response.prompt_feedback.block_reason
+                # Bandingkan dengan nilai enum BlockReason. HarmBlockThreshold adalah untuk setting.
+                if block_reason_value != genai_types.BlockedReason.BLOCKED_REASON_UNSPECIFIED: # Menggunakan enum yang benar dari types
+                    try:
+                        block_reason_name = genai_types.BlockedReason(block_reason_value).name
+                    except ValueError:
+                        block_reason_name = f"UNKNOWN_REASON_VALUE_{block_reason_value}"
                     _logger.warning(f"({context}) Prompt diblokir oleh filter keamanan Gemini. Alasan: {block_reason_name}. Feedback: {response.prompt_feedback}")
                     await message.reply(f"Maaf, permintaan Anda diblokir oleh filter keamanan AI ({block_reason_name}).")
                     return
@@ -117,18 +133,23 @@ class AICog(commands.Cog):
             return
 
         # Kirim respons dalam potongan jika terlalu panjang
-        max_length = 1990 # Sisakan ruang untuk header/footer
+        max_length = 1990
         if len(response_text) > max_length:
-            _logger.info(f"({context}) Respons teks terlalu panjang, membaginya menjadi beberapa pesan.")
+            _logger.info(f"({context}) Respons teks terlalu panjang ({len(response_text)} chars), membaginya menjadi beberapa pesan.")
             chunks = [response_text[i:i + max_length] for i in range(0, len(response_text), max_length)]
             for i, chunk in enumerate(chunks):
                 header = f"(Bagian {i + 1}/{len(chunks)}):\n" if len(chunks) > 1 else ""
                 try:
                     await message.reply(header + chunk)
                 except discord.errors.HTTPException as e:
-                    _logger.error(f"({context}) Gagal mengirim potongan pesan: {e}")
-                    await message.channel.send(f"Gagal mengirim bagian {i+1} respons: {e}") # Kirim ke channel jika reply gagal
-                await asyncio.sleep(0.5) # Jeda antar pesan
+                    _logger.error(f"({context}) Gagal mengirim potongan pesan: {e}", exc_info=True)
+                    try:
+                        await message.channel.send(f"Gagal mengirim bagian {i+1} respons: {e}")
+                    except Exception as send_err:
+                        _logger.error(f"({context}) Gagal mengirim pesan error ke channel: {send_err}", exc_info=True)
+                except Exception as e:
+                    _logger.error(f"({context}) Error tak terduga saat mengirim potongan pesan: {e}", exc_info=True)
+                await asyncio.sleep(0.5)
         else:
             await message.reply(response_text)
         _logger.info(f"({context}) Respons teks berhasil dikirim.")
@@ -139,8 +160,7 @@ class AICog(commands.Cog):
         if message.author.bot or message.guild is None:
             return
 
-        if self.text_model is None: # Model teks adalah prasyarat untuk on_message
-            # _logger.debug("Model teks Gemini tidak tersedia, on_message dilewati.") # Bisa di-uncomment untuk debugging
+        if self.text_model is None:
             return
 
         config = database.get_server_config(message.guild.id)
@@ -149,9 +169,12 @@ class AICog(commands.Cog):
         is_mentioned = bot_user and bot_user.mention in message.content
 
         in_ai_channel = ai_channel_id is not None and message.channel.id == ai_channel_id
-        just_a_mention = is_mentioned and message.content.strip() == bot_user.mention
+        # Cek apakah pesan HANYA mention bot, tanpa teks atau lampiran lain yang relevan
+        cleaned_content_for_mention_check = message.content.replace(bot_user.mention, '').strip()
+        just_a_mention = is_mentioned and not cleaned_content_for_mention_check and not message.attachments
 
-        context_log_prefix = "" # Untuk logging yang lebih baik
+
+        context_log_prefix = ""
 
         # Skenario 1: Pesan di channel AI (dan bukan hanya mention)
         if in_ai_channel and not just_a_mention:
@@ -161,49 +184,47 @@ class AICog(commands.Cog):
             async with message.channel.typing():
                 try:
                     content_parts = []
-                    # Proses lampiran gambar
                     image_attachments = [att for att in message.attachments if 'image' in att.content_type]
                     if image_attachments:
-                        if len(image_attachments) > 4:
+                        if len(image_attachments) > 4: # Batas wajar untuk API
                             await message.reply("Mohon berikan maksimal 4 gambar dalam satu waktu.")
                             return
                         for attachment in image_attachments:
                             try:
                                 image_bytes = await attachment.read()
                                 pil_image = Image.open(io.BytesIO(image_bytes))
-                                content_parts.append(pil_image) # Tambahkan objek PIL Image
+                                content_parts.append(pil_image)
                                 _logger.info(f"({context_log_prefix}) Menambahkan lampiran gambar: {attachment.filename}")
                             except Exception as img_e:
                                 _logger.error(f"({context_log_prefix}) Gagal memproses lampiran gambar {attachment.filename}: {img_e}", exc_info=True)
                                 await message.channel.send(f"Peringatan: Tidak dapat memproses gambar '{attachment.filename}'.")
-                                if len(image_attachments) == 1 and not message.content.strip().replace(bot_user.mention, '', 1).strip():
+                                # Jika hanya gambar ini dan gagal, jangan lanjutkan jika tidak ada teks
+                                if len(image_attachments) == 1 and not message.content.strip().replace(bot_user.mention if bot_user else "", '', 1).strip():
                                     await message.reply("Tidak dapat memproses gambar yang Anda kirim.")
                                     return
                     
-                    # Proses konten teks (hapus mention jika ada)
                     text_content = message.content
-                    if is_mentioned: # Hapus mention jika ada di mana saja dalam teks untuk AI channel
+                    if bot_user and bot_user.mention in text_content: # Hapus mention jika ada di mana saja
                         text_content = text_content.replace(bot_user.mention, '').strip()
                     
                     if text_content:
                         content_parts.append(text_content)
 
                     if not content_parts:
-                        _logger.debug(f"({context_log_prefix}) Pesan tidak memiliki konten yang dapat diproses (setelah filter).")
-                        # Bisa ditambahkan respons "Halo, ada yang bisa dibantu?" jika hanya mention tanpa teks lain
+                        _logger.debug(f"({context_log_prefix}) Pesan tidak memiliki konten yang dapat diproses.")
+                        # Jika pesan awalnya ada mention tapi setelah dihapus jadi kosong
                         if is_mentioned and not text_content and not image_attachments:
                              await message.reply("Halo! Ada yang bisa saya bantu?")
                         return
 
-                    # Panggil API Gemini
                     api_response = await asyncio.to_thread(
                         self.text_model.generate_content,
-                        contents=content_parts # Kirim list of parts (text dan/atau PIL.Image)
+                        contents=content_parts
                     )
                     _logger.info(f"({context_log_prefix}) Menerima respons dari Gemini.")
                     await self._process_and_send_text_response(message, api_response, context_log_prefix)
 
-                except (genai_types.BlockedPromptError, genai_types.StopCandidateError) as model_e: # Menggunakan error dari google.genai.types
+                except (genai_types.BlockedPromptError, genai_types.StopCandidateError) as model_e: # Sesuaikan dengan nama error yang benar
                     _logger.warning(f"({context_log_prefix}) Error model Gemini: {model_e}")
                     await message.reply(f"Maaf, terjadi masalah dengan model AI: {model_e}")
                 except GoogleAPIError as api_e:
@@ -212,7 +233,7 @@ class AICog(commands.Cog):
                 except Exception as e:
                     _logger.error(f"({context_log_prefix}) Error tak terduga saat memproses permintaan AI: {e}", exc_info=True)
                     await message.reply("Terjadi error tak terduga saat memproses permintaan AI.")
-            return # Selesai memproses untuk AI channel
+            return
 
         # Skenario 2: Bot dimention (di luar channel AI, atau hanya mention di channel AI)
         if is_mentioned and (not in_ai_channel or just_a_mention):
@@ -221,15 +242,14 @@ class AICog(commands.Cog):
 
             async with message.channel.typing():
                 try:
-                    text_content = message.content.replace(bot_user.mention, '', 1).strip()
-                    if not text_content: # Hanya mention, tidak ada teks tambahan
+                    text_content_for_mention = message.content.replace(bot_user.mention, '', 1).strip()
+                    if not text_content_for_mention:
                         await message.reply("Halo! Ada yang bisa saya bantu? (Sebut nama saya dengan pertanyaan Anda)")
                         return
 
-                    # Panggil API Gemini (hanya teks untuk mention sederhana)
                     api_response = await asyncio.to_thread(
                         self.text_model.generate_content,
-                        contents=text_content # Hanya kirim teks
+                        contents=text_content_for_mention # Hanya teks
                     )
                     _logger.info(f"({context_log_prefix}) Menerima respons dari Gemini untuk mention.")
                     await self._process_and_send_text_response(message, api_response, context_log_prefix)
@@ -243,7 +263,7 @@ class AICog(commands.Cog):
                 except Exception as e:
                     _logger.error(f"({context_log_prefix}) Error tak terduga saat memproses mention: {e}", exc_info=True)
                     await message.reply("Terjadi error tak terduga saat memproses permintaan AI.")
-            return # Selesai memproses mention
+            return
 
     @app_commands.command(name='generate_image', description='Membuat gambar berdasarkan deskripsi teks menggunakan AI.')
     @app_commands.describe(prompt='Deskripsikan gambar yang ingin Anda buat.')
@@ -260,32 +280,20 @@ class AICog(commands.Cog):
         if not prompt.strip():
             await interaction.response.send_message("Mohon berikan deskripsi untuk gambar yang ingin Anda buat.", ephemeral=True)
             return
-
-        # Validasi channel (opsional, bisa dihilangkan jika ingin bisa di semua channel)
-        config = database.get_server_config(interaction.guild_id)
-        ai_channel_id = config.get('ai_channel_id')
-        if ai_channel_id and interaction.channel_id != ai_channel_id:
-            ai_channel = self.bot.get_channel(ai_channel_id)
-            channel_mention = ai_channel.mention if ai_channel else f"channel AI yang ditentukan (ID: {ai_channel_id})"
-            await interaction.response.send_message(
-                f"Command ini sebaiknya digunakan di {channel_mention} untuk menjaga kerapian, namun saya akan tetap proses di sini.",
-                ephemeral=True
-            )
-            # Tidak return, tetap proses tapi beri peringatan
         
         await interaction.response.defer(ephemeral=False)
 
         try:
             _logger.info(f"Memanggil model generasi gambar Gemini dengan prompt: '{prompt}'.")
             
-            # Konfigurasi untuk meminta output gambar dan teks
-            generation_config = genai_types.GenerationConfig(
-                response_modalities=[genai_types.Modality.TEXT, genai_types.Modality.IMAGE] # Sesuai dokumentasi
+            generation_config = genai_types.GenerateContentConfig(
+                response_modalities=[genai_types.Modality.TEXT, genai_types.Modality.IMAGE] # TEXT dan IMAGE
             )
 
+            # Untuk text-to-image, 'contents' adalah prompt string
             api_response = await asyncio.to_thread(
                 self.image_gen_model.generate_content,
-                contents=prompt, # Untuk text-to-image, contents adalah prompt teks
+                contents=prompt, 
                 generation_config=generation_config
             )
             _logger.info("Menerima respons dari API generasi gambar Gemini.")
@@ -299,83 +307,115 @@ class AICog(commands.Cog):
                     for part in candidate.content.parts:
                         if hasattr(part, 'text') and part.text:
                             generated_text_parts.append(part.text)
-                        elif hasattr(part, 'inline_data') and part.inline_data.mime_type.startswith('image/'):
-                            generated_image_bytes = part.inline_data.data
+                        elif hasattr(part, 'inline_data') and part.inline_data and hasattr(part.inline_data, 'mime_type') and part.inline_data.mime_type.startswith('image/'):
+                            generated_image_bytes = part.inline_data.data # ini adalah bytes
                             _logger.info(f"Menerima inline_data gambar dari Gemini (MIME: {part.inline_data.mime_type}).")
-                            # Asumsi hanya satu gambar yang relevan, ambil yang pertama
-                            # Jika ingin menangani multiple image output, perlu loop/list di sini
-                elif hasattr(candidate,'text') and candidate.text : # fallback jika struktur agak berbeda
-                     generated_text_parts.append(candidate.text)
-
+                            # Ambil gambar pertama yang valid
+                            break # Asumsi kita hanya butuh satu gambar utama dari prompt ini
+            
             final_text_response = "\n".join(generated_text_parts).strip()
 
-            # Kirim respons
             if generated_image_bytes:
-                image_file = discord.File(io.BytesIO(generated_image_bytes), filename="generated_image.png") # Ekstensi bisa disesuaikan dari mime_type jika perlu
-                embed = discord.Embed(
-                    title="Gambar Dihasilkan!",
-                    description=f"Prompt: \"{discord.utils.escape_markdown(prompt[:1000])}{'...' if len(prompt) > 1000 else ''}\"",
-                    color=discord.Color.blue()
-                )
-                if final_text_response:
-                    embed.add_field(name="Deskripsi Tambahan dari AI:", value=final_text_response[:1020] + ('...' if len(final_text_response) > 1020 else ''), inline=False)
+                # Tentukan ekstensi file dari mime_type jika memungkinkan
+                mime_type = "image/png" # default
+                if hasattr(api_response.candidates[0].content.parts[0], 'inline_data') and \
+                   hasattr(api_response.candidates[0].content.parts[0].inline_data, 'mime_type'):
+                    # Cari part gambar untuk mendapatkan mime_type yang benar
+                    for part in api_response.candidates[0].content.parts:
+                        if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.mime_type.startswith('image/'):
+                            mime_type = part.inline_data.mime_type
+                            break
                 
-                embed.set_image(url=f"attachment://{image_file.filename}")
+                extension = mime_type.split('/')[-1] if '/' in mime_type else 'png'
+                filename = f"generated_image.{extension}"
+
+                image_file = discord.File(io.BytesIO(generated_image_bytes), filename=filename)
+                
+                embed_description = f"**Prompt:** \"{discord.utils.escape_markdown(prompt[:1000])}{'...' if len(prompt) > 1000 else ''}\""
+                if final_text_response:
+                    embed_description += f"\n\n**Deskripsi Tambahan dari AI:**\n{final_text_response[:1020]}{'...' if len(final_text_response) > 1020 else ''}"
+
+                embed = discord.Embed(
+                    title="Gambar Berhasil Dihasilkan!",
+                    description=embed_description,
+                    color=discord.Color.random() # Warna acak untuk embed
+                )
+                embed.set_image(url=f"attachment://{filename}")
+                embed.set_footer(text=f"Diminta oleh: {interaction.user.display_name}")
+                
                 await interaction.followup.send(embed=embed, file=image_file)
-                _logger.info("Gambar dan teks pendamping (jika ada) berhasil dikirim.")
-            elif final_text_response: # Hanya teks, tidak ada gambar
-                _logger.warning("Gemini menghasilkan teks tetapi tidak ada data gambar.")
+                _logger.info(f"Gambar dan teks pendamping (jika ada) berhasil dikirim untuk prompt: {prompt}")
+            elif final_text_response:
+                _logger.warning(f"Gemini menghasilkan teks tetapi tidak ada data gambar untuk prompt: {prompt}")
                 await interaction.followup.send(f"Berikut respons dari AI untuk prompt Anda (tidak ada gambar dihasilkan):\n\n{final_text_response}")
-            else: # Tidak ada teks maupun gambar
-                # Cek feedback jika respons kosong karena diblokir
+            else:
+                # Cek prompt_feedback jika tidak ada output sama sekali
                 if hasattr(api_response, 'prompt_feedback') and api_response.prompt_feedback:
-                    if api_response.prompt_feedback.block_reason != genai_types.HarmBlockThreshold.HARM_BLOCK_THRESHOLD_UNSPECIFIED:
-                        block_reason_name = genai_types.BlockedReason(api_response.prompt_feedback.block_reason).name
-                        _logger.warning(f"Prompt generasi gambar diblokir oleh filter keamanan Gemini. Alasan: {block_reason_name}. Feedback: {api_response.prompt_feedback}")
+                    block_reason_value = api_response.prompt_feedback.block_reason
+                    if block_reason_value != genai_types.BlockedReason.BLOCKED_REASON_UNSPECIFIED:
+                        try:
+                            block_reason_name = genai_types.BlockedReason(block_reason_value).name
+                        except ValueError:
+                            block_reason_name = f"UNKNOWN_REASON_VALUE_{block_reason_value}"
+                        _logger.warning(f"Prompt generasi gambar diblokir. Alasan: {block_reason_name}. Prompt: '{prompt}'. Feedback: {api_response.prompt_feedback}")
                         await interaction.followup.send(f"Maaf, permintaan generasi gambar Anda diblokir oleh filter keamanan AI ({block_reason_name}).")
                         return
-                _logger.warning(f"Gemini mengembalikan respons kosong untuk generasi gambar. Full response: {api_response}")
-                await interaction.followup.send("Maaf, gagal menghasilkan gambar atau teks. AI memberikan respons kosong.")
+                _logger.warning(f"Gemini mengembalikan respons kosong untuk generasi gambar. Prompt: '{prompt}'. Full response: {api_response}")
+                await interaction.followup.send("Maaf, gagal menghasilkan gambar atau teks. AI memberikan respons yang tidak terduga atau kosong.")
 
-        except (genai_types.BlockedPromptError, genai_types.StopCandidateError) as model_e:
-            _logger.warning(f"Error model Gemini saat generate gambar: {model_e}")
+        except (genai_types.BlockedPromptError, genai_types.StopCandidateError) as model_e: # Sesuaikan nama error
+            _logger.warning(f"Error model Gemini saat generate gambar: {model_e}. Prompt: '{prompt}'")
             await interaction.followup.send(f"Maaf, terjadi masalah dengan model AI: {model_e}", ephemeral=True)
         except GoogleAPIError as api_e:
-            _logger.error(f"Error API Google saat generate gambar: {api_e}", exc_info=True)
+            _logger.error(f"Error API Google saat generate gambar: {api_e}. Prompt: '{prompt}'", exc_info=True)
             await interaction.followup.send(f"Terjadi error pada API AI saat membuat gambar: {api_e}", ephemeral=True)
         except Exception as e:
-            _logger.error(f"Error tak terduga saat generate gambar: {e}", exc_info=True)
+            _logger.error(f"Error tak terduga saat generate gambar: {e}. Prompt: '{prompt}'", exc_info=True)
             await interaction.followup.send("Terjadi error tak terduga saat mencoba membuat gambar.", ephemeral=True)
 
+
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        """Error handler untuk slash commands di dalam AICog."""
+        """Error handler umum untuk slash commands di dalam AICog."""
         original_error = getattr(error, 'original', error)
+        command_name = interaction.command.name if interaction.command else "Unknown AI Command"
+        
         _logger.error(
-            f"Error pada AI command '{interaction.command.name if interaction.command else 'N/A'}' oleh {interaction.user.name}: {original_error}",
-            exc_info=True
+            f"Error pada command AI '{command_name}' oleh {interaction.user.name} ({interaction.user.id}): {original_error}",
+            exc_info=True # Selalu sertakan traceback untuk error yang ditangani di sini
         )
 
         send_method = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
+        error_message = "Terjadi kesalahan internal saat memproses perintah AI Anda." # Pesan default
 
         if isinstance(original_error, app_commands.CheckFailure):
-            await send_method(f"Anda tidak memenuhi syarat untuk menggunakan perintah ini: {original_error}", ephemeral=True)
-        elif isinstance(original_error, (genai_types.BlockedPromptError, genai_types.StopCandidateError)):
-            await send_method(f"Permintaan Anda ke AI diblokir atau dihentikan: {original_error}", ephemeral=True)
+            error_message = f"Anda tidak memenuhi syarat untuk menggunakan perintah ini: {original_error}"
+        elif isinstance(original_error, genai_types.BlockedPromptError):
+            error_message = f"Permintaan Anda ke AI diblokir karena melanggar kebijakan konten: {original_error}"
+        elif isinstance(original_error, genai_types.StopCandidateError):
+             error_message = f"Pembuatan respons AI dihentikan lebih awal: {original_error}"
         elif isinstance(original_error, GoogleAPIError):
-            await send_method(f"Terjadi error pada API Google: {original_error}", ephemeral=True)
-        elif isinstance(original_error, app_commands.CommandInvokeError) and isinstance(original_error.original, GoogleAPIError): # Nested GoogleAPIError
-            await send_method(f"Terjadi error pada API Google (invoke): {original_error.original}", ephemeral=True)
-        else:
-            await send_method(f"Terjadi error tak terduga saat menjalankan perintah AI: {original_error}", ephemeral=True)
+            error_message = f"Terjadi error pada layanan Google AI: {original_error}"
+        elif isinstance(original_error, app_commands.CommandInvokeError) and isinstance(original_error.original, GoogleAPIError):
+            error_message = f"Terjadi error pada layanan Google AI (invoke): {original_error.original}"
+        elif isinstance(original_error, discord.errors.HTTPException):
+            error_message = f"Terjadi error HTTP saat berkomunikasi dengan Discord: {original_error.status} - {original_error.text}"
+        
+        try:
+            await send_method(error_message, ephemeral=True)
+        except Exception as e:
+            _logger.error(f"Gagal mengirim pesan error untuk command '{command_name}': {e}", exc_info=True)
+
 
 async def setup(bot: commands.Bot):
     """Setup function untuk memuat AICog."""
     if GOOGLE_API_KEY is None:
-        _logger.error("GOOGLE_API_KEY tidak ditemukan. AICog tidak akan dimuat.")
+        _logger.error("Variabel lingkungan GOOGLE_API_KEY tidak ditemukan. AICog tidak akan dimuat.")
         return
 
-    # Inisialisasi model sudah dipanggil di atas saat modul diimpor.
-    # Cek apakah model berhasil diinisialisasi.
+    if not _gemini_client: # Jika klien gagal diinisialisasi
+        _logger.error("Klien Google GenAI gagal diinisialisasi. AICog tidak akan dimuat.")
+        return
+        
     if _gemini_text_model is None and _gemini_image_gen_model is None:
         _logger.error("Tidak ada model Gemini yang berhasil diinisialisasi. AICog tidak akan dimuat.")
         return
@@ -383,9 +423,3 @@ async def setup(bot: commands.Bot):
     cog_instance = AICog(bot)
     await bot.add_cog(cog_instance)
     _logger.info("AICog berhasil dimuat.")
-    
-    # Error handler untuk cog ini (jika ada command lain yang ditambahkan di cog ini)
-    # Untuk sekarang, generate_image_slash adalah satu-satunya command, jadi errornya bisa langsung
-    # ditangani di cog_app_command_error atau diikat secara spesifik jika perlu.
-    # Jika ada banyak command, cog_app_command_error lebih umum.
-    # cog_instance.generate_image_slash.error(cog_instance.cog_app_command_error) # Bisa juga begini
