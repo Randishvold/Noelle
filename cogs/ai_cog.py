@@ -5,15 +5,15 @@ import os
 import google.genai as genai
 from google.genai import types as genai_types
 from google.api_core.exceptions import GoogleAPIError, InvalidArgument, FailedPrecondition
-import database # Asumsi database.py ada dan berfungsi
+import database
 from discord.ext import commands
 from discord import app_commands
 import logging
-from PIL import Image # Hanya jika masih ada fitur yang membutuhkan ini secara langsung di cog
 import io
 import asyncio
-# import re # Tidak digunakan lagi secara aktif di versi ini
+import re # Untuk mencari pemisah kalimat/paragraf
 
+# ... (Konfigurasi logging, konstanta model, kunci API, inisialisasi klien tetap sama) ...
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
 _logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ def initialize_gemini_client():
 
 initialize_gemini_client()
 
+
 class AICog(commands.Cog):
     """Cog untuk fitur interaksi AI menggunakan Gemini dari Google GenAI."""
 
@@ -65,7 +66,145 @@ class AICog(commands.Cog):
             _logger.info(f"Mengirim respons panjang sebagai file '{filename}'.")
         except Exception as e:
             _logger.error(f"Gagal mengirim teks sebagai file: {e}", exc_info=True)
-            await target.send("Gagal mengirim respons sebagai file. Silakan coba lagi nanti.")
+            # Jangan kirim pesan error lagi di sini jika ini adalah fallback terakhir
+            # await target.send("Gagal mengirim respons sebagai file. Silakan coba lagi nanti.")
+
+
+    def _find_sensible_split_point(self, text: str, max_len: int) -> int:
+        """
+        Mencari titik potong yang "masuk akal" (akhir kalimat atau paragraf) dalam batas max_len.
+        Mengembalikan indeks titik potong. Jika tidak ditemukan, potong di max_len.
+        """
+        if len(text) <= max_len:
+            return len(text)
+
+        # Cari dari belakang dalam rentang max_len
+        slice_to_check = text[:max_len]
+        
+        # Prioritas: Akhir paragraf (\n\n)
+        split_point_newline = slice_to_check.rfind('\n\n')
+        if split_point_newline != -1:
+            # Jika ditemukan \n\n, potong setelah itu
+            return split_point_newline + 2 
+
+        # Prioritas kedua: Akhir kalimat (. ! ?) diikuti spasi atau akhir string
+        sentence_enders = ['. ', '! ', '? '] # Tambahkan spasi untuk memastikan bukan bagian dari kata (misal Mr.)
+        best_split_point = -1
+        for ender in sentence_enders:
+            point = slice_to_check.rfind(ender)
+            if point != -1 and point + len(ender) > best_split_point:
+                best_split_point = point + len(ender)
+        
+        if best_split_point != -1:
+            return best_split_point
+
+        # Prioritas ketiga: Akhir baris tunggal (\n)
+        split_point_single_newline = slice_to_check.rfind('\n')
+        if split_point_single_newline != -1:
+            return split_point_single_newline + 1
+
+        # Jika tidak ada titik ideal, potong di spasi terakhir sebelum max_len
+        last_space = slice_to_check.rfind(' ')
+        if last_space != -1:
+            return last_space + 1
+            
+        # Jika tidak ada spasi, potong paksa di max_len
+        return max_len
+
+    async def _send_text_in_embeds(self, target_messageable: discord.abc.Messageable, response_text: str, title_prefix: str, footer_text: str, is_followup: bool):
+        """
+        Mengirim teks dalam maksimal 2 embed. Jika masih ada sisa, kirim sebagai file.
+        target_messageable: Channel atau konteks interaksi untuk mengirim.
+        is_followup: True jika ini adalah followup dari interaksi.
+        """
+        EMBED_TITLE_LIMIT = 256
+        EMBED_DESC_LIMIT = 4096
+        EMBED_FIELD_VALUE_LIMIT = 1024
+        MAX_FIELDS_PER_EMBED = 25 # Batas Discord
+        # Perkiraan karakter yang aman untuk satu embed (memberi ruang untuk judul, field name, footer)
+        SAFE_CHAR_PER_EMBED = 5800 
+
+        embeds_to_send = []
+        remaining_text = response_text
+
+        for i in range(2): # Maksimal 2 embed
+            if not remaining_text.strip():
+                break
+
+            current_embed_char_count = 0
+            embed = discord.Embed(
+                title=f"{title_prefix} (Bagian {i+1})" if i > 0 or (len(response_text) > SAFE_CHAR_PER_EMBED and i==0) else title_prefix,
+                color=discord.Color.random()
+            )
+            if footer_text:
+                embed.set_footer(text=footer_text)
+            
+            current_embed_char_count += len(embed.title or "") + len(embed.footer.text or "")
+
+            # Isi deskripsi embed
+            desc_split_len = self._find_sensible_split_point(remaining_text, EMBED_DESC_LIMIT)
+            # Cek apakah penambahan deskripsi akan melebihi batas total embed
+            if current_embed_char_count + desc_split_len <= SAFE_CHAR_PER_EMBED:
+                embed.description = remaining_text[:desc_split_len]
+                remaining_text = remaining_text[desc_split_len:].lstrip() # lstrip untuk hapus spasi/newline di awal
+                current_embed_char_count += len(embed.description or "")
+            else: # Jika deskripsi saja sudah terlalu panjang untuk sisa kuota embed, coba lebih pendek
+                shorter_desc_len = self._find_sensible_split_point(remaining_text, SAFE_CHAR_PER_EMBED - current_embed_char_count - 50) # -50 untuk buffer
+                if shorter_desc_len > 0 :
+                    embed.description = remaining_text[:shorter_desc_len]
+                    remaining_text = remaining_text[shorter_desc_len:].lstrip()
+                    current_embed_char_count += len(embed.description or "")
+                # Jika tidak ada deskripsi yang bisa masuk, biarkan kosong, field akan diisi
+
+            # Isi fields jika masih ada teks dan kuota karakter/field
+            field_count = 0
+            while remaining_text.strip() and field_count < MAX_FIELDS_PER_EMBED and current_embed_char_count < SAFE_CHAR_PER_EMBED:
+                field_name = "Lanjutan..." # Nama field sederhana
+                current_embed_char_count += len(field_name)
+
+                # Hitung sisa budget karakter untuk value field ini
+                remaining_char_for_field = SAFE_CHAR_PER_EMBED - current_embed_char_count
+                max_val_len = min(EMBED_FIELD_VALUE_LIMIT, remaining_char_for_field)
+                if max_val_len <= 0: break # Tidak ada ruang lagi di embed ini
+
+                val_split_len = self._find_sensible_split_point(remaining_text, max_val_len)
+                
+                field_value = remaining_text[:val_split_len]
+                embed.add_field(name=field_name, value=field_value, inline=False)
+                
+                remaining_text = remaining_text[val_split_len:].lstrip()
+                current_embed_char_count += len(field_value)
+                field_count += 1
+            
+            embeds_to_send.append(embed)
+
+        # Kirim embed yang sudah dibuat
+        for idx, emb in enumerate(embeds_to_send):
+            try:
+                if is_followup and idx == 0: # Hanya followup.send pertama untuk interaksi
+                    await target_messageable.followup.send(embed=emb)
+                else: # Pesan biasa atau embed lanjutan untuk interaksi
+                    await target_messageable.send(embed=emb)
+                _logger.info(f"Mengirim embed bagian {idx+1}.")
+                await asyncio.sleep(0.3) # Jeda kecil antar embed
+            except discord.errors.HTTPException as e:
+                _logger.error(f"Gagal mengirim embed bagian {idx+1}: {e}", exc_info=True)
+                # Jika embed gagal, coba kirim konten embed itu sebagai file
+                failed_embed_content = f"Title: {emb.title}\nDescription: {emb.description}\n"
+                for field in emb.fields:
+                    failed_embed_content += f"\nField ({field.name}):\n{field.value}\n"
+                await self._send_long_text_as_file(target_messageable, failed_embed_content, f"error_embed_part_{idx+1}.txt", "Gagal mengirim embed, mengirim kontennya sebagai file:")
+                # Jika embed pertama gagal, sisa teks (jika ada) juga kirim sebagai file
+                if idx == 0 and remaining_text.strip():
+                    await self._send_long_text_as_file(target_messageable, remaining_text, "sisa_respons.txt", "Sisa respons setelah kegagalan embed:")
+                    remaining_text = "" # Tandai sudah terkirim
+                break # Hentikan pengiriman embed berikutnya jika satu gagal
+
+
+        # Jika masih ada sisa teks setelah maksimal 2 embed
+        if remaining_text.strip():
+            _logger.info("Teks masih tersisa setelah 2 embed, mengirim sisanya sebagai file.")
+            await self._send_long_text_as_file(target_messageable, remaining_text, "respons_lanjutan.txt", "Respons lanjutan (melebihi kapasitas 2 embed):")
 
 
     async def _process_and_send_text_response(self, message_or_interaction, response: genai_types.GenerateContentResponse, context: str, is_interaction: bool = False):
@@ -73,7 +212,6 @@ class AICog(commands.Cog):
         Memproses respons teks dari Gemini dan mengirimkannya sebagai embed atau file.
         """
         response_text = ""
-        # Ekstraksi teks dari respons API
         if hasattr(response, 'text') and response.text:
             response_text = response.text
         elif hasattr(response, 'candidates') and response.candidates:
@@ -84,22 +222,26 @@ class AICog(commands.Cog):
             elif hasattr(candidate, 'text') and candidate.text:
                 response_text = candidate.text
 
-        # Tentukan fungsi pengiriman berdasarkan tipe (pesan atau interaksi)
-        target_to_send: discord.abc.Messageable
-        initial_send_func = None
-        followup_send_func = None
+        # Tentukan target pengiriman awal
+        send_target_initial: discord.abc.Messageable # Untuk pesan pertama (embed atau file)
+        # Tentukan target pengiriman lanjutan (jika ada multiple embed atau file lanjutan)
+        send_target_followup: discord.abc.Messageable # Channel untuk pesan/embed lanjutan
+
+        title_prefix = f"Respons Noelle ({context})"
+        footer_txt = ""
 
         if is_interaction:
-            target_to_send = interaction.channel # Untuk send_long_text_as_file atau followup
-            initial_send_func = message_or_interaction.followup.send
-            followup_send_func = message_or_interaction.channel.send # Untuk potongan tambahan embed jika ada
-        else: # Ini adalah message
-            target_to_send = message_or_interaction.channel
-            initial_send_func = message_or_interaction.reply
-            followup_send_func = message_or_interaction.reply
+            send_target_initial = message_or_interaction # Objek Interaction
+            send_target_followup = message_or_interaction.channel # Channel dari Interaction
+            footer_txt = f"Diminta oleh: {message_or_interaction.user.display_name}"
+        else: # Ini adalah Message
+            send_target_initial = message_or_interaction # Objek Message
+            send_target_followup = message_or_interaction.channel # Channel dari Message
+            footer_txt = f"Untuk: {message_or_interaction.author.display_name}"
+
 
         if not response_text.strip():
-            # Penanganan jika respons kosong atau diblokir
+            # Penanganan jika respons kosong atau diblokir (tetap sama)
             if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
                 block_reason_value = response.prompt_feedback.block_reason
                 if block_reason_value != genai_types.BlockedReason.BLOCKED_REASON_UNSPECIFIED:
@@ -108,88 +250,40 @@ class AICog(commands.Cog):
                     except ValueError:
                         block_reason_name = f"UNKNOWN_REASON_VALUE_{block_reason_value}"
                     _logger.warning(f"({context}) Prompt diblokir. Alasan: {block_reason_name}.")
-                    await initial_send_func(f"Maaf, permintaan Anda diblokir oleh filter keamanan AI ({block_reason_name}).", ephemeral=is_interaction)
+                    
+                    # Kirim pesan error
+                    if is_interaction:
+                        await send_target_initial.followup.send(f"Maaf, permintaan Anda diblokir ({block_reason_name}).", ephemeral=True)
+                    else:
+                        await send_target_initial.reply(f"Maaf, permintaan Anda diblokir ({block_reason_name}).")
                     return
             _logger.warning(f"({context}) Gemini mengembalikan respons kosong.")
-            await initial_send_func("Maaf, saya tidak bisa memberikan respons saat ini.", ephemeral=is_interaction)
+            if is_interaction:
+                await send_target_initial.followup.send("Maaf, saya tidak bisa memberikan respons saat ini.", ephemeral=True)
+            else:
+                await send_target_initial.reply("Maaf, saya tidak bisa memberikan respons saat ini.")
             return
 
-        # Batas karakter untuk embed
-        EMBED_TITLE_LIMIT = 256
-        EMBED_DESC_LIMIT = 4096
-        EMBED_FIELD_NAME_LIMIT = 256 # Tidak digunakan untuk nama field, tapi baik untuk diketahui
-        EMBED_FIELD_VALUE_LIMIT = 1024
-        MAX_FIELDS = 25
-        TOTAL_EMBED_CHAR_LIMIT = 6000 # Batas total karakter praktis
-        
-        # Coba kirim sebagai embed dulu
+        # Gunakan fungsi baru untuk mengirim dalam embed
         try:
-            if len(response_text) <= EMBED_DESC_LIMIT: # Muat dalam deskripsi tunggal
-                embed = discord.Embed(
-                    title=f"Respons dari Noelle ({context})",
-                    description=response_text,
-                    color=discord.Color.random()
-                )
-                if is_interaction:
-                    embed.set_footer(text=f"Diminta oleh: {message_or_interaction.user.display_name}")
-                else: # message
-                    embed.set_footer(text=f"Untuk: {message_or_interaction.author.display_name}")
-                await initial_send_func(embed=embed)
-                _logger.info(f"({context}) Respons teks dikirim sebagai embed tunggal.")
-            
-            # Jika lebih panjang dari deskripsi, coba bagi ke fields (logika sederhana)
-            elif len(response_text) <= TOTAL_EMBED_CHAR_LIMIT - EMBED_TITLE_LIMIT - 100: # Beri ruang untuk judul & footer
-                embed = discord.Embed(
-                    title=f"Respons dari Noelle ({context})",
-                    color=discord.Color.random()
-                )
-                if is_interaction:
-                    embed.set_footer(text=f"Diminta oleh: {message_or_interaction.user.display_name}")
-                else: # message
-                    embed.set_footer(text=f"Untuk: {message_or_interaction.author.display_name}")
-
-                remaining_text = response_text
-                field_count = 0
-                
-                # Bagian pertama di deskripsi jika muat
-                if len(remaining_text) > EMBED_DESC_LIMIT:
-                    embed.description = remaining_text[:EMBED_DESC_LIMIT-3] + "..."
-                    remaining_text = remaining_text[EMBED_DESC_LIMIT-3:]
-                else:
-                    embed.description = remaining_text
-                    remaining_text = ""
-
-                # Sisa teks dibagi ke fields
-                while remaining_text and field_count < MAX_FIELDS:
-                    chunk = remaining_text[:EMBED_FIELD_VALUE_LIMIT]
-                    embed.add_field(name=f"Lanjutan ({field_count + 1})" if field_count > 0 or embed.description else "Respons", value=chunk, inline=False)
-                    remaining_text = remaining_text[len(chunk):]
-                    field_count += 1
-                
-                await initial_send_func(embed=embed)
-                _logger.info(f"({context}) Respons teks dikirim sebagai embed dengan beberapa field.")
-
-                # Jika masih ada sisa teks setelah embed pertama dengan field penuh
-                if remaining_text:
-                    _logger.info(f"({context}) Teks masih tersisa setelah embed pertama, mengirim sebagai file.")
-                    await self._send_long_text_as_file(target_to_send, remaining_text, filename=f"lanjutan_respons_{context.lower().replace(' ', '_')}.txt", initial_message="Lanjutan respons karena terlalu panjang untuk embed:")
-            
-            else: # Terlalu panjang bahkan untuk dibagi ke fields, kirim sebagai file
-                _logger.info(f"({context}) Respons teks terlalu panjang ({len(response_text)} chars), mengirim sebagai file.")
-                await self._send_long_text_as_file(target_to_send, response_text, filename=f"respons_{context.lower().replace(' ', '_')}.txt")
-
-        except discord.errors.HTTPException as e:
-            _logger.error(f"({context}) Gagal mengirim embed/file: {e}", exc_info=True)
-            # Fallback ke pengiriman teks biasa jika embed gagal dan teks tidak terlalu ekstrim
-            if len(response_text) < 1990 : # Batas aman untuk pesan teks biasa
-                await initial_send_func(f"Gagal mengirim respons dalam format embed. Berikut teksnya:\n\n{response_text[:1950]}{'...' if len(response_text)>1950 else ''}", ephemeral=is_interaction)
-            else: # Jika embed gagal dan teksnya juga panjang, fallback ke file
-                await self._send_long_text_as_file(target_to_send, response_text, filename=f"respons_error_{context.lower().replace(' ', '_')}.txt", initial_message="Gagal mengirim respons dalam format embed. Berikut respons sebagai file:")
-        except Exception as e:
-            _logger.error(f"({context}) Error tak terduga saat memproses/mengirim respons teks: {e}", exc_info=True)
-            await initial_send_func("Terjadi error saat menampilkan respons dari AI.", ephemeral=is_interaction)
+            await self._send_text_in_embeds(
+                target_messageable=send_target_followup if is_interaction else send_target_initial, # Untuk followup, kirim ke channel
+                response_text=response_text,
+                title_prefix=title_prefix,
+                footer_text=footer_txt,
+                is_followup=is_interaction # Jika interaksi, embed pertama adalah followup
+            )
+            _logger.info(f"({context}) Respons teks selesai diproses (embed/file).")
+        except Exception as e: # Tangkapan umum jika _send_text_in_embeds gagal total
+            _logger.error(f"({context}) Error besar saat mencoba mengirim respons via _send_text_in_embeds: {e}", exc_info=True)
+            # Fallback terakhir jika semua gagal
+            if is_interaction:
+                await send_target_initial.followup.send("Terjadi kesalahan signifikan saat menampilkan respons.", ephemeral=True)
+            else:
+                await send_target_initial.reply("Terjadi kesalahan signifikan saat menampilkan respons.")
 
 
+    # ... (on_message tetap sama, hanya memanggil _process_and_send_text_response yang baru) ...
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
@@ -245,7 +339,6 @@ class AICog(commands.Cog):
                         contents=content_parts
                     )
                     _logger.info(f"({context_log_prefix}) Menerima respons dari Gemini.")
-                    # Menggunakan is_interaction=False
                     await self._process_and_send_text_response(message, api_response, context_log_prefix, is_interaction=False)
 
                 except (InvalidArgument, FailedPrecondition) as specific_api_e:
@@ -275,7 +368,6 @@ class AICog(commands.Cog):
                         contents=text_content_for_mention
                     )
                     _logger.info(f"({context_log_prefix}) Menerima respons dari Gemini.")
-                    # Menggunakan is_interaction=False
                     await self._process_and_send_text_response(message, api_response, context_log_prefix, is_interaction=False)
                 
                 except (InvalidArgument, FailedPrecondition) as specific_api_e:
@@ -288,6 +380,7 @@ class AICog(commands.Cog):
                     _logger.error(f"({context_log_prefix}) Error tak terduga: {e}", exc_info=True)
                     await message.reply("Terjadi error tak terduga.")
             return
+
 
     @app_commands.command(name='generate_image', description='Membuat gambar berdasarkan deskripsi teks menggunakan AI.')
     @app_commands.describe(prompt='Deskripsikan gambar yang ingin Anda buat.')
@@ -309,17 +402,17 @@ class AICog(commands.Cog):
                 "Channel AI belum diatur di server ini. Silakan minta admin untuk mengatur menggunakan `/config ai_channel`.",
                 ephemeral=True
             )
-            _logger.warning(f"/generate_image digunakan oleh {interaction.user.name} tapi channel AI belum diatur di guild {interaction.guild.name}.")
+            _logger.warning(f"/generate_image oleh {interaction.user.name}: channel AI belum diatur di guild {interaction.guild.name}.")
             return
         
         if interaction.channel_id != ai_channel_id:
             designated_channel = self.bot.get_channel(ai_channel_id)
-            channel_mention = designated_channel.mention if designated_channel else f"channel AI yang telah ditentukan (ID: {ai_channel_id})"
+            channel_mention = designated_channel.mention if designated_channel else f"channel AI (ID: {ai_channel_id})"
             await interaction.response.send_message(
                 f"Perintah ini hanya dapat digunakan di {channel_mention}.",
                 ephemeral=True
             )
-            _logger.warning(f"/generate_image digunakan oleh {interaction.user.name} di channel {interaction.channel.name}, bukan di channel AI ({ai_channel_id}).")
+            _logger.warning(f"/generate_image oleh {interaction.user.name} di channel {interaction.channel.name}, bukan di channel AI ({ai_channel_id}).")
             return
         # --- AKHIR VALIDASI CHANNEL AI ---
 
@@ -327,7 +420,7 @@ class AICog(commands.Cog):
             await interaction.response.send_message("Mohon berikan deskripsi gambar.", ephemeral=True)
             return
         
-        await interaction.response.defer(ephemeral=False) # Defer di sini, sebelum try-except utama
+        await interaction.response.defer(ephemeral=False)
 
         try:
             _logger.info(f"Memanggil model gambar Gemini dengan prompt: '{prompt}'.")
@@ -366,8 +459,6 @@ class AICog(commands.Cog):
                 filename = f"gemini_image.{extension}"
                 image_file = discord.File(io.BytesIO(generated_image_bytes), filename=filename)
                 
-                # Teks pendamping akan dimasukkan ke deskripsi embed. Jika terlalu panjang, _process_and_send_text_response akan menanganinya.
-                # Untuk kasus ini, kita buat embed sederhana dulu, teks pendamping bisa dikirim terpisah jika panjang.
                 embed_title = "Gambar Dihasilkan oleh Noelle ✨"
                 prompt_display = f"**Prompt:** \"{discord.utils.escape_markdown(prompt[:1000])}{'...' if len(prompt) > 1000 else ''}\""
                 
@@ -375,50 +466,33 @@ class AICog(commands.Cog):
                 image_embed.set_image(url=f"attachment://{filename}")
                 image_embed.set_footer(text=f"Diminta oleh: {interaction.user.display_name}")
                 
-                await interaction.followup.send(embed=image_embed, file=image_file)
+                await interaction.followup.send(embed=image_embed, file=image_file) # Kirim gambar dulu
                 _logger.info(f"Gambar berhasil dikirim untuk prompt: {prompt}")
 
-                # Kirim teks pendamping secara terpisah jika ada, menggunakan logika embed/file
-                if final_text_response:
+                if final_text_response: # Jika ada teks pendamping
                     _logger.info("Mengirim teks pendamping untuk gambar...")
-                    # Buat objek "dummy" response hanya untuk teks agar bisa dipakai _process_and_send_text_response
-                    # Ini agak hacky, idealnya _process_and_send_text_response bisa menerima teks langsung
+                    # Buat dummy response untuk teks
                     dummy_text_part = genai_types.Part(text=final_text_response)
                     dummy_content = genai_types.Content(parts=[dummy_text_part], role="model")
-                    dummy_candidate = genai_types.Candidate(content=dummy_content, finish_reason=genai_types.FinishReason.STOP, index=0) # finish_reason dan index dummy
+                    dummy_candidate = genai_types.Candidate(content=dummy_content, finish_reason=genai_types.FinishReason.STOP, index=0)
                     dummy_response_for_text = genai_types.GenerateContentResponse(candidates=[dummy_candidate])
-
-                    # Gunakan interaction.channel.send untuk teks pendamping agar tidak mengganggu followup gambar
-                    # Atau, kita bisa buat fungsi send_text_response_to_channel yang lebih generik
-                    class DummyMessageable: # Objek dummy untuk message.reply atau interaction.followup.send
-                        def __init__(self, channel, original_interaction):
-                            self.channel = channel
-                            self.original_interaction = original_interaction
-                            self.author = original_interaction.user # Mirip author message
-                            self.guild = original_interaction.guild # Mirip guild message
-
-                        async def reply(self, *args, **kwargs): # Mirip message.reply
-                            return await self.channel.send(*args, **kwargs)
-
-                        async def send(self, *args, **kwargs): # Mirip channel.send
-                             return await self.channel.send(*args, **kwargs)
                     
-                    # Kita akan mengirim teks pendamping sebagai pesan baru di channel
+                    # Kirim teks pendamping sebagai pesan baru di channel (bukan followup interaction utama)
+                    # Ini akan menggunakan self._send_text_in_embeds
                     await self._process_and_send_text_response(
-                        DummyMessageable(interaction.channel, interaction), 
+                        interaction.channel, # Targetnya adalah channel
                         dummy_response_for_text, 
-                        "Image Gen Companion Text", 
-                        is_interaction=False # Perlakukan sebagai pesan baru, bukan followup dari interaksi utama
+                        "Info Tambahan Gambar", 
+                        is_interaction=False # Perlakukan sebagai pesan baru
                     )
 
-
-            elif final_text_response: # Hanya teks, tidak ada gambar
-                _logger.warning(f"Gemini menghasilkan teks tapi tidak ada data gambar. Prompt: '{prompt}'")
-                # Kirim menggunakan logika embed/file
+            elif final_text_response: 
+                _logger.warning(f"Gemini menghasilkan teks tapi tidak ada gambar. Prompt: '{prompt}'")
                 dummy_text_part = genai_types.Part(text=final_text_response)
                 dummy_content = genai_types.Content(parts=[dummy_text_part], role="model")
                 dummy_candidate = genai_types.Candidate(content=dummy_content, finish_reason=genai_types.FinishReason.STOP, index=0)
                 dummy_response_for_text = genai_types.GenerateContentResponse(candidates=[dummy_candidate])
+                # Kirim sebagai followup karena ini adalah respons utama dari command
                 await self._process_and_send_text_response(interaction, dummy_response_for_text, "Image Gen Text-Only", is_interaction=True)
             else:
                 if hasattr(api_response, 'prompt_feedback') and api_response.prompt_feedback:
@@ -444,6 +518,7 @@ class AICog(commands.Cog):
             _logger.error(f"Error tak terduga saat generate gambar: {e}. Prompt: '{prompt}'", exc_info=True)
             await interaction.followup.send(f"Terjadi error tak terduga saat membuat gambar: {type(e).__name__} - {e}", ephemeral=True)
 
+    # ... (cog_app_command_error dan setup tetap sama) ...
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         # (Error handler ini sebagian besar tetap sama, pastikan pesan errornya jelas)
         original_error = getattr(error, 'original', error)
