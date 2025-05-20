@@ -255,7 +255,6 @@ class AICog(commands.Cog):
                 else: await message_or_interaction.reply(err_msg)
             except Exception: _logger.error(f"({context}) Gagal kirim error akhir.", exc_info=True)
 
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         global _ai_service_enabled
@@ -269,52 +268,43 @@ class AICog(commands.Cog):
         is_mentioned = bot_user and bot_user.mention in message.content
         in_ai_channel = ai_channel_id is not None and message.channel.id == ai_channel_id
         
-        # Hanya proses jika di AI channel atau dimention
         if not in_ai_channel and not is_mentioned:
             return
 
-        # Logika untuk membersihkan mention dan mendapatkan konten utama
         text_content = message.content
         if is_mentioned:
             text_content = text_content.replace(bot_user.mention, '').strip()
 
-        # Jika setelah membersihkan mention tidak ada teks dan tidak ada lampiran, dan ini adalah mention, maka sapa.
-        # Atau jika di AI channel, pesan yang hanya mention (setelah mention dihilangkan jadi kosong) juga akan disapa.
         is_effectively_empty_after_mention_removal = not text_content and not message.attachments
         
         if is_mentioned and is_effectively_empty_after_mention_removal:
             await message.reply("Halo! Ada yang bisa saya bantu? (Sebut nama saya dengan pertanyaan Anda)")
             return
 
-        # --- Logika Sesi Chat untuk AI Channel ---
         if in_ai_channel:
             context_log_prefix = f"AI Channel Session ({message.channel.id})"
             _logger.info(f"({context_log_prefix}) Pesan dari {message.author.name}")
             
             async with message.channel.typing():
                 try:
-                    # Dapatkan atau buat sesi chat
                     chat_session = self.active_chat_sessions.get(message.channel.id)
                     if chat_session is None:
-                        # Periksa apakah model teks tersedia sebelum membuat sesi
                         try:
-                            _gemini_client.models.get(model=GEMINI_TEXT_MODEL_NAME) # Cek cepat
+                            _gemini_client.models.get(model=GEMINI_TEXT_MODEL_NAME) 
                         except Exception:
-                            _logger.error(f"({context_log_prefix}) Model teks '{GEMINI_TEXT_MODEL_NAME}' tidak dapat diakses. Tidak dapat memulai sesi chat.")
-                            await message.reply(f"Maaf, model AI ({GEMINI_TEXT_MODEL_NAME}) tidak tersedia saat ini.")
+                            _logger.error(f"({context_log_prefix}) Model teks '{GEMINI_TEXT_MODEL_NAME}' tidak dapat diakses. Sesi chat tidak dimulai.")
+                            await message.reply(f"Maaf, model AI ({GEMINI_TEXT_MODEL_NAME}) tidak tersedia.")
                             return
 
                         chat_session = _gemini_client.chats.create(model=GEMINI_TEXT_MODEL_NAME)
                         self.active_chat_sessions[message.channel.id] = chat_session
-                        self.chat_token_counts[message.channel.id] = 0 # Reset token count
+                        self.chat_token_counts[message.channel.id] = 0
                         _logger.info(f"({context_log_prefix}) Sesi chat baru dimulai.")
                     
-                    # Update waktu aktivitas
                     self.chat_session_last_active[message.channel.id] = datetime.datetime.now(datetime.timezone.utc)
 
-                    # Siapkan input untuk Gemini (bisa teks saja atau teks + gambar)
-                    user_input_parts = []
-                    if text_content: # Teks yang sudah dibersihkan dari mention
+                    user_input_parts = [] # Ini akan menjadi argumen 'message' untuk send_message
+                    if text_content:
                         user_input_parts.append(text_content)
                     
                     image_attachments = [att for att in message.attachments if 'image' in att.content_type]
@@ -324,39 +314,43 @@ class AICog(commands.Cog):
                         for attachment in image_attachments:
                             try:
                                 image_bytes = await attachment.read()
+                                # Untuk mengirim gambar dalam ChatSession, kita bisa langsung kirim PIL.Image object
+                                # atau google.generativeai.types.Blob jika diperlukan oleh struktur 'message'
+                                # Dokumentasi 'google-genai' untuk chat.send_message(message=...)
+                                # menyebut 'message' bisa berupa string, Part, list of Part, atau Content.
+                                # Kita akan tetap menggunakan PIL.Image karena itu juga dikonversi menjadi Part.
                                 pil_image = Image.open(io.BytesIO(image_bytes))
-                                user_input_parts.append(pil_image) # Tambahkan objek PIL Image
+                                user_input_parts.append(pil_image) 
                             except Exception as img_e:
                                 _logger.error(f"({context_log_prefix}) Gagal proses gambar lampiran: {img_e}", exc_info=True)
                                 await message.channel.send(f"Gagal memproses gambar: {attachment.filename}")
-                                # Jika hanya gambar ini dan gagal, dan tidak ada teks, jangan lanjutkan
                                 if len(image_attachments) == 1 and not text_content: return
                     
-                    if not user_input_parts: # Jika tidak ada input sama sekali (seharusnya sudah ditangani di atas)
+                    if not user_input_parts:
                         _logger.debug(f"({context_log_prefix}) Tidak ada input yang valid untuk dikirim ke AI.")
                         return
 
-                    # Kirim pesan ke sesi chat
-                    # `send_message` di ChatSession menerima `contents`
-                    api_response = await asyncio.to_thread(chat_session.send_message, contents=user_input_parts)
+                    # --- PERBAIKAN PEMANGGILAN API ---
+                    # Argumennya adalah 'message', bukan 'contents' untuk chat_session.send_message
+                    api_response = await asyncio.to_thread(chat_session.send_message, message=user_input_parts)
+                    # --- AKHIR PERBAIKAN ---
+
                     _logger.info(f"({context_log_prefix}) Menerima respons dari sesi chat Gemini.")
                     await self._process_and_send_text_response(message, api_response, context_log_prefix, is_interaction=False)
 
-                    # Perbarui dan cek jumlah token
-                    if chat_session.history: # Pastikan histori tidak kosong
+                    if chat_session.history:
                         try:
                             token_count_response = await asyncio.to_thread(
                                 _gemini_client.models.count_tokens,
-                                contents=chat_session.history # Hitung token dari seluruh histori sesi
+                                contents=chat_session.history 
                             )
                             current_tokens = token_count_response.total_tokens
                             self.chat_token_counts[message.channel.id] = current_tokens
                             _logger.info(f"({context_log_prefix}) Perkiraan token saat ini: {current_tokens}")
 
                             if current_tokens > MAX_CONTEXT_TOKENS:
-                                _logger.warning(f"({context_log_prefix}) Konteks token ({current_tokens}) melebihi batas ({MAX_CONTEXT_TOKENS}). Mereset sesi.")
-                                await message.channel.send(f"✨ Sesi percakapan telah mencapai batasnya dan akan direset untuk memulai yang baru! ✨")
-                                # Buat sesi baru (clear context)
+                                _logger.warning(f"({context_log_prefix}) Konteks token ({current_tokens}) > batas ({MAX_CONTEXT_TOKENS}). Mereset sesi.")
+                                await message.channel.send(f"✨ Sesi percakapan telah mencapai batasnya dan akan direset! ✨")
                                 chat_session = _gemini_client.chats.create(model=GEMINI_TEXT_MODEL_NAME)
                                 self.active_chat_sessions[message.channel.id] = chat_session
                                 self.chat_token_counts[message.channel.id] = 0
@@ -371,30 +365,30 @@ class AICog(commands.Cog):
                     await message.reply(f"Error API AI: {e}")
                 except Exception as e: 
                     _logger.error(f"({context_log_prefix}) Error tak terduga: {e}", exc_info=True)
-                    await message.reply("Error tak terduga.")
-            return # Selesai untuk AI Channel
+                    await message.reply(f"Error tak terduga: {type(e).__name__} - {e}") # Tambahkan detail error
+            return 
 
-        # --- Logika Mention (di luar AI channel, atau jika hanya mention di AI channel) ---
-        # Tetap stateless, tidak menggunakan sesi chat
-        if is_mentioned: # text_content sudah dibersihkan dari mention di awal
+        # ... (Logika mention tetap sama) ...
+        if is_mentioned: 
             context_log_prefix = "Bot Mention"
             _logger.info(f"({context_log_prefix}) Memproses mention dari {message.author.name}...")
             async with message.channel.typing():
                 try:
-                    # Untuk mention, kita hanya proses teks. Gambar diabaikan.
-                    if not text_content: # Jika hanya mention tanpa teks lain (sudah di-handle di atas sebenarnya)
+                    if not text_content: 
                         await message.reply("Halo! Ada yang bisa saya bantu?"); return
 
+                    # Untuk mention, kita tidak menggunakan ChatSession, jadi pemanggilan tetap ke client.models.generate_content
+                    # dan argumennya adalah 'contents'.
                     api_response = await asyncio.to_thread(
                         _gemini_client.models.generate_content,
                         model=GEMINI_TEXT_MODEL_NAME,
-                        contents=text_content # Kirim hanya teks
+                        contents=text_content 
                     )
                     _logger.info(f"({context_log_prefix}) Menerima respons dari Gemini.")
                     await self._process_and_send_text_response(message, api_response, context_log_prefix, is_interaction=False)
                 except (InvalidArgument, FailedPrecondition) as e: _logger.warning(f"({context_log_prefix}) Error API (safety/prompt): {e}"); await message.reply(f"Permintaan tidak dapat diproses: {e}")
                 except GoogleAPIError as e: _logger.error(f"({context_log_prefix}) Error API Google: {e}", exc_info=True); await message.reply(f"Error API AI: {e}")
-                except Exception as e: _logger.error(f"({context_log_prefix}) Error tak terduga: {e}", exc_info=True); await message.reply("Error tak terduga.")
+                except Exception as e: _logger.error(f"({context_log_prefix}) Error tak terduga: {e}", exc_info=True); await message.reply(f"Error tak terduga: {type(e).__name__} - {e}")
             return
 
     # --- Grup Command AI ---
