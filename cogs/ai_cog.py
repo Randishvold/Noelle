@@ -4,20 +4,17 @@ import discord
 import os
 import google.genai as genai
 from google.genai import types as genai_types
-# HAPUS BARIS INI: from google.genai.chats import ChatSession 
-# Kita akan menggunakan tipe genai.chats.Chat secara langsung
+# genai.chats.Chat akan digunakan untuk anotasi tipe
 from google.api_core.exceptions import GoogleAPIError, InvalidArgument, FailedPrecondition
 import database
 from discord.ext import commands, tasks
 from discord import app_commands
 import logging
-# from PIL import Image # Hanya jika Anda memproses gambar input secara langsung selain dari lampiran
+from PIL import Image 
 import io
 import asyncio
-import datetime # Untuk timestamp sesi
-# import re # Tidak digunakan lagi secara aktif di versi ini, kecuali jika _find_sensible_split_point memerlukannya
+import datetime
 
-# ... (Konfigurasi logging, konstanta model, kunci API, inisialisasi klien tetap sama) ...
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
 _logger = logging.getLogger(__name__)
 
@@ -31,6 +28,7 @@ _gemini_client: genai.Client | None = None
 _ai_service_enabled = True 
 
 def initialize_gemini_client():
+    # ... (fungsi ini tetap sama) ...
     global _gemini_client
     if GOOGLE_API_KEY is None:
         _logger.error("Variabel lingkungan GOOGLE_API_KEY tidak diatur. Fitur AI tidak akan tersedia.")
@@ -38,7 +36,6 @@ def initialize_gemini_client():
     try:
         _gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
         _logger.info("Klien Google GenAI berhasil diinisialisasi.")
-        # Verifikasi model opsional
         try: _gemini_client.models.get(model=GEMINI_TEXT_MODEL_NAME); _logger.info(f"Model '{GEMINI_TEXT_MODEL_NAME}' OK.")
         except Exception as e: _logger.warning(f"Gagal cek model '{GEMINI_TEXT_MODEL_NAME}': {e}")
         try: _gemini_client.models.get(model=GEMINI_IMAGE_GEN_MODEL_NAME); _logger.info(f"Model '{GEMINI_IMAGE_GEN_MODEL_NAME}' OK.")
@@ -54,78 +51,56 @@ class AICog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Key: channel_id, Value: objek genai.chats.Chat
-        self.active_chat_sessions: dict[int, genai.chats.Chat] = {} # PERUBAHAN TIPE ANOTASI
+        self.active_chat_sessions: dict[int, genai.chats.Chat] = {} 
         self.chat_session_last_active: dict[int, datetime.datetime] = {}
-        self.chat_token_counts: dict[int, int] = {} 
-        
+        # --- MODIFIKASI: Hanya menyimpan jumlah token, bukan histori manual ---
+        self.chat_context_token_counts: dict[int, int] = {} 
+        # ------------------------------------------------------------------
         self.session_cleanup_loop.start()
         _logger.info("AICog instance telah dibuat dan session cleanup loop dimulai.")
 
- 
     def cog_unload(self):
-        self.session_cleanup_loop.cancel() # Hentikan loop saat cog di-unload
+        self.session_cleanup_loop.cancel()
         _logger.info("AICog di-unload dan session cleanup loop dihentikan.")
 
-    # --- Helper untuk command AI channel ---
-    async def _is_ai_channel(self, interaction: discord.Interaction) -> bool:
-        """Pengecekan apakah interaksi terjadi di channel AI yang dikonfigurasi."""
-        if not interaction.guild_id: return False # Bukan di server
+    def _clear_session_data(self, channel_id: int):
+        """Membersihkan semua data terkait sesi untuk channel_id tertentu."""
+        if channel_id in self.active_chat_sessions: del self.active_chat_sessions[channel_id]
+        if channel_id in self.chat_session_last_active: del self.chat_session_last_active[channel_id]
+        # --- MODIFIKASI: Reset token count ---
+        if channel_id in self.chat_context_token_counts: del self.chat_context_token_counts[channel_id]
+        # -------------------------------------
+
+    # ... (_is_ai_channel, _ensure_ai_channel, session_cleanup_loop, _send_long_text_as_file, _find_sensible_split_point, _send_text_in_embeds, _process_and_send_text_response tetap sama) ...
+    async def _is_ai_channel(self, interaction: discord.Interaction) -> bool: # ... (tetap sama) ...
+        if not interaction.guild_id: return False
         config = database.get_server_config(interaction.guild_id)
         ai_channel_id = config.get('ai_channel_id')
         return ai_channel_id is not None and interaction.channel_id == ai_channel_id
 
-    async def _ensure_ai_channel(self, interaction: discord.Interaction) -> bool:
-        """Memastikan command hanya bisa di AI channel, mengirim pesan jika tidak."""
+    async def _ensure_ai_channel(self, interaction: discord.Interaction) -> bool: # ... (tetap sama) ...
         config = database.get_server_config(interaction.guild_id)
         ai_channel_id = config.get('ai_channel_id')
-
         if ai_channel_id is None:
-            await interaction.response.send_message(
-                "Channel AI belum diatur. Minta admin atur via `/config ai_channel`.",
-                ephemeral=True
-            )
-            return False
-        
+            await interaction.response.send_message("Channel AI belum diatur.", ephemeral=True); return False
         if interaction.channel_id != ai_channel_id:
-            designated_channel = self.bot.get_channel(ai_channel_id)
-            channel_mention = designated_channel.mention if designated_channel else f"channel AI (ID: {ai_channel_id})"
-            await interaction.response.send_message(
-                f"Perintah ini hanya dapat digunakan di {channel_mention}.",
-                ephemeral=True
-            )
-            return False
+            ch = self.bot.get_channel(ai_channel_id)
+            await interaction.response.send_message(f"Cmd ini hanya di {ch.mention if ch else 'channel AI'}.", ephemeral=True); return False
         return True
-
-    # --- Loop Pembersihan Sesi ---
-    @tasks.loop(minutes=5) # Cek setiap 5 menit
-    async def session_cleanup_loop(self):
-        """Membersihkan sesi chat yang sudah timeout."""
-        now = datetime.datetime.now(datetime.timezone.utc)
-        timed_out_sessions_channel_ids = []
-        for channel_id, last_active_time in list(self.chat_session_last_active.items()): # list() untuk copy
-            if (now - last_active_time).total_seconds() > SESSION_TIMEOUT_MINUTES * 60:
-                timed_out_sessions_channel_ids.append(channel_id)
         
-        for channel_id in timed_out_sessions_channel_ids:
-            if channel_id in self.active_chat_sessions:
-                del self.active_chat_sessions[channel_id]
-            if channel_id in self.chat_session_last_active:
-                del self.chat_session_last_active[channel_id]
-            if channel_id in self.chat_token_counts:
-                del self.chat_token_counts[channel_id]
-            _logger.info(f"Sesi chat untuk channel {channel_id} telah timeout dan dibersihkan.")
-            # Opsional: kirim pesan ke channel bahwa sesi direset karena timeout
-            # channel = self.bot.get_channel(channel_id)
-            # if channel:
-            #     try: await channel.send("Sesi chat dengan Noelle telah direset karena tidak aktif.")
-            #     except Exception: pass
+    @tasks.loop(minutes=5)
+    async def session_cleanup_loop(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        timed_out_ids = [ch_id for ch_id, la_time in list(self.chat_session_last_active.items()) 
+                         if (now - la_time).total_seconds() > SESSION_TIMEOUT_MINUTES * 60]
+        for channel_id in timed_out_ids:
+            self._clear_session_data(channel_id) # Gunakan helper clear
+            _logger.info(f"Sesi chat untuk channel {channel_id} timeout & dibersihkan.")
 
     @session_cleanup_loop.before_loop
-    async def before_session_cleanup_loop(self):
-        await self.bot.wait_until_ready() # Tunggu bot siap sebelum loop dimulai
+    async def before_session_cleanup_loop(self): # ... (tetap sama) ...
+        await self.bot.wait_until_ready()
 
-    # ... (_send_long_text_as_file dan _find_sensible_split_point tetap sama) ...
     async def _send_long_text_as_file(self, target_channel: discord.abc.Messageable, text_content: str, filename: str = "response.txt", initial_message: str = "Respons terlalu panjang, dikirim sebagai file:"):
         try:
             file_data = io.BytesIO(text_content.encode('utf-8'))
@@ -152,7 +127,6 @@ class AICog(commands.Cog):
         if last_space != -1: return last_space + 1
         return max_len
 
-    # ... (_send_text_in_embeds dan _process_and_send_text_response tetap sama seperti versi sebelumnya) ...
     async def _send_text_in_embeds(self, target_channel: discord.abc.Messageable, response_text: str, title_prefix: str, footer_text: str, reply_to_message: discord.Message | None = None, interaction_to_followup: discord.Interaction | None = None):
         EMBED_TITLE_LIMIT = 256; EMBED_DESC_LIMIT = 4096; EMBED_FIELD_VALUE_LIMIT = 1024
         MAX_FIELDS_PER_EMBED = 25; SAFE_CHAR_PER_EMBED = 5800 
@@ -206,7 +180,7 @@ class AICog(commands.Cog):
         if remaining_text.strip(): await self._send_long_text_as_file(target_channel, remaining_text, "respons_lanjutan.txt", "Respons lanjutan (melebihi embed):")
 
     async def _process_and_send_text_response(self, message_or_interaction, response_obj: genai_types.GenerateContentResponse, context: str, is_interaction: bool = False):
-        response_text = "" # Ekstraksi teks dari respons API
+        response_text = ""; # ... (Ekstraksi teks dari respons API tetap sama) ...
         if hasattr(response_obj, 'text') and response_obj.text: response_text = response_obj.text
         elif hasattr(response_obj, 'candidates') and response_obj.candidates:
             candidate = response_obj.candidates[0]
@@ -227,7 +201,7 @@ class AICog(commands.Cog):
             footer_txt = f"Untuk: {message_or_interaction.author.display_name}"
             initial_sender = msg_to_reply.reply
 
-        if not response_text.strip(): # Penanganan respons kosong/diblokir
+        if not response_text.strip(): # ... (Penanganan respons kosong/diblokir tetap sama) ...
             if hasattr(response_obj, 'prompt_feedback') and response_obj.prompt_feedback:
                 block_reason_val = response_obj.prompt_feedback.block_reason
                 if block_reason_val != genai_types.BlockedReason.BLOCKED_REASON_UNSPECIFIED:
@@ -240,12 +214,12 @@ class AICog(commands.Cog):
             await initial_sender("Maaf, saya tidak bisa memberikan respons saat ini.", ephemeral=is_interaction)
             return
         try:
-            if context == "Info Tambahan Gambar" and is_interaction: # Teks pendamping gambar, kirim ke channel
+            if context == "Info Tambahan Gambar" and is_interaction:
                 await self._send_text_in_embeds(target_ch, response_text, title_prefix, footer_txt, None, None)
             else:
                 await self._send_text_in_embeds(target_ch, response_text, title_prefix, footer_txt, msg_to_reply, interaction_to_fup)
             _logger.info(f"({context}) Respons teks selesai diproses.")
-        except Exception as e:
+        except Exception as e: # ... (Error handling akhir tetap sama) ...
             _logger.error(f"({context}) Error besar saat _process_and_send_text_response: {e}", exc_info=True)
             err_msg = "Terjadi kesalahan signifikan saat menampilkan respons."
             try:
@@ -254,6 +228,7 @@ class AICog(commands.Cog):
                     else: await message_or_interaction.followup.send(err_msg, ephemeral=True)
                 else: await message_or_interaction.reply(err_msg)
             except Exception: _logger.error(f"({context}) Gagal kirim error akhir.", exc_info=True)
+
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -264,126 +239,112 @@ class AICog(commands.Cog):
         config = database.get_server_config(message.guild.id)
         ai_channel_id = config.get('ai_channel_id')
         bot_user = self.bot.user
-        
         is_mentioned = bot_user and bot_user.mention in message.content
         in_ai_channel = ai_channel_id is not None and message.channel.id == ai_channel_id
-        
-        if not in_ai_channel and not is_mentioned:
-            return
+        if not in_ai_channel and not is_mentioned: return
 
         text_content = message.content
-        if is_mentioned:
-            text_content = text_content.replace(bot_user.mention, '').strip()
-
+        if is_mentioned: text_content = text_content.replace(bot_user.mention, '').strip()
         is_effectively_empty_after_mention_removal = not text_content and not message.attachments
-        
         if is_mentioned and is_effectively_empty_after_mention_removal:
-            await message.reply("Halo! Ada yang bisa saya bantu? (Sebut nama saya dengan pertanyaan Anda)")
-            return
+            await message.reply("Halo! Ada yang bisa saya bantu? (Sebut nama saya dengan pertanyaan Anda)"); return
 
         if in_ai_channel:
             context_log_prefix = f"AI Channel Session ({message.channel.id})"
             _logger.info(f"({context_log_prefix}) Pesan dari {message.author.name}")
-            
             async with message.channel.typing():
                 try:
                     chat_session = self.active_chat_sessions.get(message.channel.id)
-                    if chat_session is None:
-                        try:
-                            _gemini_client.models.get(model=GEMINI_TEXT_MODEL_NAME) 
-                        except Exception:
-                            _logger.error(f"({context_log_prefix}) Model teks '{GEMINI_TEXT_MODEL_NAME}' tidak dapat diakses. Sesi chat tidak dimulai.")
-                            await message.reply(f"Maaf, model AI ({GEMINI_TEXT_MODEL_NAME}) tidak tersedia.")
-                            return
+                    # --- MODIFIKASI: Ambil jumlah token saat ini ---
+                    current_total_tokens = self.chat_context_token_counts.get(message.channel.id, 0)
+                    # -----------------------------------------------
 
-                        chat_session = _gemini_client.chats.create(model=GEMINI_TEXT_MODEL_NAME)
+                    if chat_session is None:
+                        try: _gemini_client.models.get(model=GEMINI_TEXT_MODEL_NAME)
+                        except Exception:
+                            _logger.error(f"({context_log_prefix}) Model '{GEMINI_TEXT_MODEL_NAME}' tidak diakses. Sesi tidak dimulai.")
+                            await message.reply(f"Model AI ({GEMINI_TEXT_MODEL_NAME}) tidak tersedia."); return
+                        
+                        chat_session = _gemini_client.chats.create(model=GEMINI_TEXT_MODEL_NAME, history=[])
                         self.active_chat_sessions[message.channel.id] = chat_session
-                        self.chat_token_counts[message.channel.id] = 0
+                        # --- MODIFIKASI: Inisialisasi token count ---
+                        self.chat_context_token_counts[message.channel.id] = 0 
+                        current_total_tokens = 0 # Update variabel lokal juga
+                        # -------------------------------------------
                         _logger.info(f"({context_log_prefix}) Sesi chat baru dimulai.")
                     
                     self.chat_session_last_active[message.channel.id] = datetime.datetime.now(datetime.timezone.utc)
-
-                    user_input_parts = [] # Ini akan menjadi argumen 'message' untuk send_message
-                    if text_content:
-                        user_input_parts.append(text_content)
-                    
+                    user_input_parts_for_api = []
+                    if text_content: user_input_parts_for_api.append(text_content)
                     image_attachments = [att for att in message.attachments if 'image' in att.content_type]
                     if image_attachments:
-                        if len(image_attachments) > 4:
-                            await message.reply("Mohon berikan maksimal 4 gambar."); return
+                        if len(image_attachments) > 4: await message.reply("Maks. 4 gambar."); return
                         for attachment in image_attachments:
                             try:
-                                image_bytes = await attachment.read()
-                                # Untuk mengirim gambar dalam ChatSession, kita bisa langsung kirim PIL.Image object
-                                # atau google.generativeai.types.Blob jika diperlukan oleh struktur 'message'
-                                # Dokumentasi 'google-genai' untuk chat.send_message(message=...)
-                                # menyebut 'message' bisa berupa string, Part, list of Part, atau Content.
-                                # Kita akan tetap menggunakan PIL.Image karena itu juga dikonversi menjadi Part.
-                                pil_image = Image.open(io.BytesIO(image_bytes))
-                                user_input_parts.append(pil_image) 
+                                image_bytes = await attachment.read(); pil_image = Image.open(io.BytesIO(image_bytes))
+                                user_input_parts_for_api.append(pil_image)
                             except Exception as img_e:
-                                _logger.error(f"({context_log_prefix}) Gagal proses gambar lampiran: {img_e}", exc_info=True)
-                                await message.channel.send(f"Gagal memproses gambar: {attachment.filename}")
+                                _logger.error(f"({context_log_prefix}) Gagal proses gambar: {img_e}", exc_info=True)
+                                await message.channel.send(f"Gagal proses gambar: {attachment.filename}")
                                 if len(image_attachments) == 1 and not text_content: return
+                    if not user_input_parts_for_api: _logger.debug(f"({context_log_prefix}) Tidak ada input valid."); return
+
+                    # --- MODIFIKASI: Hitung token input pengguna ---
+                    # Buat objek Content sementara untuk dihitung tokennya
+                    temp_user_parts_for_count = []
+                    for item in user_input_parts_for_api:
+                        if isinstance(item, str): temp_user_parts_for_count.append(genai_types.Part(text=item))
+                        elif isinstance(item, Image.Image): temp_user_parts_for_count.append(item) # count_tokens bisa handle Image
                     
-                    if not user_input_parts:
-                        _logger.debug(f"({context_log_prefix}) Tidak ada input yang valid untuk dikirim ke AI.")
-                        return
-
-                    # --- PERBAIKAN PEMANGGILAN API ---
-                    # Argumennya adalah 'message', bukan 'contents' untuk chat_session.send_message
-                    api_response = await asyncio.to_thread(chat_session.send_message, message=user_input_parts)
-                    # --- AKHIR PERBAIKAN ---
-
-                    _logger.info(f"({context_log_prefix}) Menerima respons dari sesi chat Gemini.")
-                    await self._process_and_send_text_response(message, api_response, context_log_prefix, is_interaction=False)
-
-                    if chat_session.history:
+                    if temp_user_parts_for_count: # Hanya hitung jika ada parts
+                        user_input_content_for_count = genai_types.Content(parts=temp_user_parts_for_count, role="user")
                         try:
-                            token_count_response = await asyncio.to_thread(
-                                _gemini_client.models.count_tokens,
-                                contents=chat_session.history 
-                            )
-                            current_tokens = token_count_response.total_tokens
-                            self.chat_token_counts[message.channel.id] = current_tokens
-                            _logger.info(f"({context_log_prefix}) Perkiraan token saat ini: {current_tokens}")
-
-                            if current_tokens > MAX_CONTEXT_TOKENS:
-                                _logger.warning(f"({context_log_prefix}) Konteks token ({current_tokens}) > batas ({MAX_CONTEXT_TOKENS}). Mereset sesi.")
-                                await message.channel.send(f"✨ Sesi percakapan telah mencapai batasnya dan akan direset! ✨")
-                                chat_session = _gemini_client.chats.create(model=GEMINI_TEXT_MODEL_NAME)
-                                self.active_chat_sessions[message.channel.id] = chat_session
-                                self.chat_token_counts[message.channel.id] = 0
+                            count_resp = await asyncio.to_thread(_gemini_client.models.count_tokens, contents=[user_input_content_for_count])
+                            current_total_tokens += count_resp.total_tokens
                         except Exception as e:
-                            _logger.error(f"({context_log_prefix}) Gagal menghitung token histori: {e}", exc_info=True)
-                    
-                except (InvalidArgument, FailedPrecondition) as e:
-                    _logger.warning(f"({context_log_prefix}) Error API Google (safety/prompt): {e}")
-                    await message.reply(f"Permintaan tidak dapat diproses: {e}")
-                except GoogleAPIError as e: 
-                    _logger.error(f"({context_log_prefix}) Error API Google: {e}", exc_info=True)
-                    await message.reply(f"Error API AI: {e}")
-                except Exception as e: 
-                    _logger.error(f"({context_log_prefix}) Error tak terduga: {e}", exc_info=True)
-                    await message.reply(f"Error tak terduga: {type(e).__name__} - {e}") # Tambahkan detail error
-            return 
+                            _logger.error(f"({context_log_prefix}) Gagal hitung token input user: {e}")
+                    # ------------------------------------------------
 
-        # ... (Logika mention tetap sama) ...
-        if is_mentioned: 
-            context_log_prefix = "Bot Mention"
+                    api_response = await asyncio.to_thread(chat_session.send_message, message=user_input_parts_for_api)
+                    _logger.info(f"({context_log_prefix}) Menerima respons dari sesi chat Gemini.")
+
+                    # --- MODIFIKASI: Hitung token output model ---
+                    if hasattr(api_response, 'candidates') and api_response.candidates and \
+                       hasattr(api_response.candidates[0], 'content'):
+                        model_response_content_for_count = api_response.candidates[0].content
+                        try:
+                            count_resp = await asyncio.to_thread(_gemini_client.models.count_tokens, contents=[model_response_content_for_count])
+                            current_total_tokens += count_resp.total_tokens
+                        except Exception as e:
+                            _logger.error(f"({context_log_prefix}) Gagal hitung token output model: {e}")
+                    
+                    self.chat_context_token_counts[message.channel.id] = current_total_tokens # Simpan total baru
+                    _logger.info(f"({context_log_prefix}) Perkiraan total token saat ini: {current_total_tokens}")
+                    # -----------------------------------------------
+
+                    await self._process_and_send_text_response(message, api_response, context_log_prefix, is_interaction=False)
+                    
+                    # --- MODIFIKASI: Cek batas token setelah update ---
+                    if current_total_tokens > MAX_CONTEXT_TOKENS:
+                        _logger.warning(f"({context_log_prefix}) Konteks token ({current_total_tokens}) > batas ({MAX_CONTEXT_TOKENS}). Mereset sesi.")
+                        await message.channel.send(f"✨ Sesi percakapan telah mencapai batasnya dan akan direset! ✨")
+                        self._clear_session_data(message.channel.id)
+                    # ----------------------------------------------------
+                    
+                # ... (blok except lainnya tetap sama) ...
+                except (InvalidArgument, FailedPrecondition) as e: _logger.warning(f"({context_log_prefix}) Error API (safety/prompt): {e}"); await message.reply(f"Permintaan tidak dapat diproses: {e}")
+                except GoogleAPIError as e: _logger.error(f"({context_log_prefix}) Error API Google: {e}", exc_info=True); await message.reply(f"Error API AI: {e}")
+                except Exception as e: _logger.error(f"({context_log_prefix}) Error tak terduga: {e}", exc_info=True); await message.reply(f"Error tak terduga: {type(e).__name__} - {e}")
+            return
+
+        if is_mentioned: # ... (Logika mention stateless tetap sama) ...
+            context_log_prefix = "Bot Mention" # ... (dst)
             _logger.info(f"({context_log_prefix}) Memproses mention dari {message.author.name}...")
             async with message.channel.typing():
                 try:
-                    if not text_content: 
-                        await message.reply("Halo! Ada yang bisa saya bantu?"); return
-
-                    # Untuk mention, kita tidak menggunakan ChatSession, jadi pemanggilan tetap ke client.models.generate_content
-                    # dan argumennya adalah 'contents'.
+                    if not text_content: await message.reply("Halo! Ada yang bisa saya bantu?"); return
                     api_response = await asyncio.to_thread(
-                        _gemini_client.models.generate_content,
-                        model=GEMINI_TEXT_MODEL_NAME,
-                        contents=text_content 
-                    )
+                        _gemini_client.models.generate_content, model=GEMINI_TEXT_MODEL_NAME, contents=text_content)
                     _logger.info(f"({context_log_prefix}) Menerima respons dari Gemini.")
                     await self._process_and_send_text_response(message, api_response, context_log_prefix, is_interaction=False)
                 except (InvalidArgument, FailedPrecondition) as e: _logger.warning(f"({context_log_prefix}) Error API (safety/prompt): {e}"); await message.reply(f"Permintaan tidak dapat diproses: {e}")
@@ -391,22 +352,19 @@ class AICog(commands.Cog):
                 except Exception as e: _logger.error(f"({context_log_prefix}) Error tak terduga: {e}", exc_info=True); await message.reply(f"Error tak terduga: {type(e).__name__} - {e}")
             return
 
-    # --- Grup Command AI ---
+
     ai_group = app_commands.Group(name="ai", description="Perintah terkait manajemen fitur AI Noelle.")
 
     @ai_group.command(name="clear_context", description="Membersihkan histori percakapan saat ini di channel AI ini.")
     async def ai_clear_context(self, interaction: discord.Interaction):
         global _ai_service_enabled
-        if not _ai_service_enabled:
-            await interaction.response.send_message("Layanan AI sedang tidak aktif.", ephemeral=True); return
-        if not await self._ensure_ai_channel(interaction): return # Pastikan di AI channel
+        if not _ai_service_enabled: await interaction.response.send_message("Layanan AI sedang tidak aktif.", ephemeral=True); return
+        if not await self._ensure_ai_channel(interaction): return
 
         channel_id = interaction.channel_id
-        if channel_id in self.active_chat_sessions:
-            del self.active_chat_sessions[channel_id]
-            if channel_id in self.chat_session_last_active: del self.chat_session_last_active[channel_id]
-            if channel_id in self.chat_token_counts: del self.chat_token_counts[channel_id]
-            await interaction.response.send_message("✨ Konteks percakapan di channel ini telah dibersihkan. Sesi chat baru akan dimulai.", ephemeral=False)
+        if channel_id in self.active_chat_sessions: # Cukup cek salah satu
+            self._clear_session_data(channel_id)
+            await interaction.response.send_message("✨ Konteks percakapan di channel ini telah dibersihkan.", ephemeral=False)
             _logger.info(f"Konteks chat untuk channel {channel_id} dibersihkan oleh {interaction.user.name}.")
         else:
             await interaction.response.send_message("Tidak ada sesi chat aktif untuk dibersihkan di channel ini.", ephemeral=True)
@@ -414,25 +372,17 @@ class AICog(commands.Cog):
     @ai_group.command(name="session_status", description="Menampilkan status sesi chat saat ini di channel AI ini.")
     async def ai_session_status(self, interaction: discord.Interaction):
         global _ai_service_enabled
-        if not _ai_service_enabled:
-            await interaction.response.send_message("Layanan AI sedang tidak aktif.", ephemeral=True); return
+        if not _ai_service_enabled: await interaction.response.send_message("Layanan AI sedang tidak aktif.", ephemeral=True); return
         if not await self._ensure_ai_channel(interaction): return
 
         channel_id = interaction.channel_id
-        if channel_id in self.active_chat_sessions:
+        if channel_id in self.active_chat_sessions : # Cek sesi aktif
             last_active_dt = self.chat_session_last_active.get(channel_id)
-            last_active_str = discord.utils.format_dt(last_active_dt, "R") if last_active_dt else "Tidak diketahui"
+            last_active_str = discord.utils.format_dt(last_active_dt, "R") if last_active_dt else "Baru saja dimulai"
             
-            token_count = self.chat_token_counts.get(channel_id, 0)
-            if token_count == 0 and self.active_chat_sessions[channel_id].history: # Jika 0 tapi ada histori, hitung ulang
-                try:
-                    count_resp = await asyncio.to_thread(_gemini_client.models.count_tokens, contents=self.active_chat_sessions[channel_id].history)
-                    token_count = count_resp.total_tokens
-                    self.chat_token_counts[channel_id] = token_count
-                except Exception as e:
-                    _logger.error(f"Gagal menghitung token untuk status sesi di channel {channel_id}: {e}")
-                    token_count = "Gagal menghitung"
-
+            # --- MODIFIKASI: Ambil dari self.chat_context_token_counts ---
+            token_count_display = self.chat_context_token_counts.get(channel_id, 0)
+            # -------------------------------------------------------------
 
             timeout_dt = last_active_dt + datetime.timedelta(minutes=SESSION_TIMEOUT_MINUTES) if last_active_dt else None
             timeout_str = discord.utils.format_dt(timeout_dt, "R") if timeout_dt else "N/A"
@@ -440,55 +390,42 @@ class AICog(commands.Cog):
             embed = discord.Embed(title=f"Status Sesi AI - #{interaction.channel.name}", color=discord.Color.blue())
             embed.add_field(name="Status Sesi", value="Aktif", inline=False)
             embed.add_field(name="Aktivitas Terakhir", value=last_active_str, inline=True)
-            embed.add_field(name="Perkiraan Token Konteks", value=f"{token_count} / {MAX_CONTEXT_TOKENS}", inline=True)
+            # --- MODIFIKASI: Tampilkan jumlah token yang disimpan ---
+            embed.add_field(name="Perkiraan Total Token Konteks", value=f"{token_count_display} / {MAX_CONTEXT_TOKENS}", inline=True)
+            # Tidak bisa lagi menampilkan panjang histori karena tidak disimpan
+            # embed.add_field(name="Panjang Histori Tersimpan", value=f"{len(self.manual_chat_histories.get(channel_id, [])) // 2} giliran percakapan", inline=True)
+            # -----------------------------------------------------
             embed.add_field(name="Timeout Sesi Berikutnya", value=timeout_str, inline=False)
             embed.set_footer(text="Konteks akan direset jika melebihi batas token atau timeout.")
             await interaction.response.send_message(embed=embed, ephemeral=True)
         else:
-            await interaction.response.send_message("Tidak ada sesi chat aktif di channel ini. Kirim pesan untuk memulai!", ephemeral=True)
+            await interaction.response.send_message("Tidak ada sesi chat aktif di channel ini.", ephemeral=True)
 
+    # ... (ai_toggle_service, generate_image_slash, cog_app_command_error, setup tetap sama) ...
     @ai_group.command(name="toggle_service", description="Mengaktifkan atau menonaktifkan layanan AI Noelle secara global.")
-    @app_commands.choices(status=[
-        app_commands.Choice(name="Aktifkan", value="on"),
-        app_commands.Choice(name="Nonaktifkan", value="off"),
-    ])
+    @app_commands.choices(status=[app_commands.Choice(name="Aktifkan", value="on"), app_commands.Choice(name="Nonaktifkan", value="off")])
     @commands.has_permissions(manage_guild=True) # Hanya admin server
     async def ai_toggle_service(self, interaction: discord.Interaction, status: app_commands.Choice[str]):
         global _ai_service_enabled, _gemini_client
-        
         new_status_bool = status.value == "on"
-
         if new_status_bool == _ai_service_enabled:
-            await interaction.response.send_message(f"Layanan AI sudah dalam status **{'aktif' if _ai_service_enabled else 'nonaktif'}**.", ephemeral=True)
-            return
-
+            await interaction.response.send_message(f"Layanan AI sudah dalam status **{'aktif' if _ai_service_enabled else 'nonaktif'}**.", ephemeral=True); return
         _ai_service_enabled = new_status_bool
-        
         if _ai_service_enabled:
-            if _gemini_client is None: # Jika client belum ada (misal karena API key baru ditambahkan)
-                initialize_gemini_client() # Coba inisialisasi lagi
-            
+            if _gemini_client is None: initialize_gemini_client()
             if _gemini_client:
-                # Bersihkan semua sesi aktif saat layanan diaktifkan kembali
-                self.active_chat_sessions.clear()
-                self.chat_session_last_active.clear()
-                self.chat_token_counts.clear()
+                for ch_id in list(self.active_chat_sessions.keys()): self._clear_session_data(ch_id)
                 _logger.info("Layanan AI diaktifkan. Semua sesi chat aktif telah dibersihkan.")
-                await interaction.response.send_message("✅ Layanan AI Noelle telah **diaktifkan** secara global. Semua sesi chat sebelumnya telah direset.", ephemeral=False)
+                await interaction.response.send_message("✅ Layanan AI Noelle telah **diaktifkan** global. Sesi sebelumnya direset.", ephemeral=False)
             else:
-                _ai_service_enabled = False # Gagal aktifkan jika client tidak bisa dibuat
-                _logger.error("Gagal mengaktifkan layanan AI karena klien Gemini tidak dapat diinisialisasi.")
-                await interaction.response.send_message("⚠️ Gagal mengaktifkan layanan AI. Pastikan GOOGLE_API_KEY sudah benar dan coba lagi.", ephemeral=True)
+                _ai_service_enabled = False 
+                _logger.error("Gagal aktifkan layanan AI karena klien Gemini tidak dapat diinisialisasi.")
+                await interaction.response.send_message("⚠️ Gagal aktifkan layanan AI. Cek GOOGLE_API_KEY.", ephemeral=True)
         else:
-            # Saat menonaktifkan, kita juga membersihkan sesi
-            self.active_chat_sessions.clear()
-            self.chat_session_last_active.clear()
-            self.chat_token_counts.clear()
+            for ch_id in list(self.active_chat_sessions.keys()): self._clear_session_data(ch_id)
             _logger.info("Layanan AI dinonaktifkan. Semua sesi chat aktif telah dibersihkan.")
-            await interaction.response.send_message("🛑 Layanan AI Noelle telah **dinonaktifkan** secara global. Semua sesi chat telah dihentikan.", ephemeral=False)
+            await interaction.response.send_message("🛑 Layanan AI Noelle telah **dinonaktifkan** global. Sesi dihentikan.", ephemeral=False)
 
-
-    # ... (generate_image_slash tetap sama, termasuk validasi AI channel) ...
     @app_commands.command(name='generate_image', description='Membuat gambar berdasarkan deskripsi teks menggunakan AI.')
     @app_commands.describe(prompt='Deskripsikan gambar yang ingin Anda buat.')
     @app_commands.guild_only()
@@ -506,7 +443,7 @@ class AICog(commands.Cog):
             await send_method_ephemeral("Layanan AI tidak tersedia.", ephemeral=True)
             return
 
-        if not await self._ensure_ai_channel(interaction): return # Validasi AI Channel
+        if not await self._ensure_ai_channel(interaction): return
 
         if not prompt.strip():
             await send_method_ephemeral("Mohon berikan deskripsi gambar.", ephemeral=True)
@@ -577,7 +514,6 @@ class AICog(commands.Cog):
         except GoogleAPIError as e: _logger.error(f"Error API Google /generate_image: {e}. Prompt: '{prompt}'", exc_info=True); await interaction.followup.send(f"Error API AI: {e}", ephemeral=True)
         except Exception as e: _logger.error(f"Error tak terduga /generate_image: {e}. Prompt: '{prompt}'", exc_info=True); await interaction.followup.send(f"Error tak terduga: {type(e).__name__} - {e}", ephemeral=True)
 
-    # ... (cog_app_command_error tetap sama) ...
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         original_error = getattr(error, 'original', error)
         command_name = interaction.command.name if interaction.command else "Unknown AI Cmd"
@@ -597,22 +533,17 @@ class AICog(commands.Cog):
              except Exception as ch_e: _logger.error(f"Gagal kirim error ke channel utk cmd '{command_name}': {ch_e}", exc_info=True)
         except Exception as e: _logger.error(f"Gagal kirim pesan error utk cmd '{command_name}': {e}", exc_info=True)
 
-
 async def setup(bot: commands.Bot):
-    global _ai_service_enabled # Pastikan variabel global bisa diakses
+    global _ai_service_enabled 
     if GOOGLE_API_KEY is None:
         _logger.error("GOOGLE_API_KEY tidak ada. AICog tidak dimuat.")
-        _ai_service_enabled = False # Nonaktifkan layanan jika kunci tidak ada
+        _ai_service_enabled = False 
         return
-    if _gemini_client is None: # Jika inisialisasi gagal
+    if _gemini_client is None: 
         _logger.error("Klien Gemini gagal inisialisasi. AICog tidak dimuat.")
-        _ai_service_enabled = False # Nonaktifkan layanan
+        _ai_service_enabled = False 
         return
-    
-    # Jika semua baik, layanan AI diaktifkan (jika sebelumnya nonaktif karena error startup)
     _ai_service_enabled = True 
     cog_instance = AICog(bot)
-    # Daftarkan grup command ke tree bot
-    # bot.tree.add_command(cog_instance.ai_group) 
-    await bot.add_cog(cog_instance)
-    _logger.info("AICog berhasil dimuat dan grup command 'ai' ditambahkan.")
+    await bot.add_cog(cog_instance) # Ini sudah mendaftarkan command dalam cog_instance.ai_group
+    _logger.info("AICog berhasil dimuat.")
