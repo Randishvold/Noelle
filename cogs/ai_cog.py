@@ -4,16 +4,18 @@ import discord
 import os
 import google.genai as genai
 from google.genai import types as genai_types
-from google.genai.chats import ChatSession # Import ChatSession
+# HAPUS BARIS INI: from google.genai.chats import ChatSession 
+# Kita akan menggunakan tipe genai.chats.Chat secara langsung
 from google.api_core.exceptions import GoogleAPIError, InvalidArgument, FailedPrecondition
 import database
 from discord.ext import commands, tasks
 from discord import app_commands
 import logging
-from PIL import Image
+# from PIL import Image # Hanya jika Anda memproses gambar input secara langsung selain dari lampiran
 import io
 import asyncio
 import datetime # Untuk timestamp sesi
+# import re # Tidak digunakan lagi secara aktif di versi ini, kecuali jika _find_sensible_split_point memerlukannya
 
 # ... (Konfigurasi logging, konstanta model, kunci API, inisialisasi klien tetap sama) ...
 logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
@@ -21,13 +23,12 @@ _logger = logging.getLogger(__name__)
 
 GEMINI_TEXT_MODEL_NAME = "models/gemini-2.0-flash"
 GEMINI_IMAGE_GEN_MODEL_NAME = "models/gemini-2.0-flash-preview-image-generation"
-MAX_CONTEXT_TOKENS = 120000 # Batas aman sebelum 128k
-SESSION_TIMEOUT_MINUTES = 30 # Timeout sesi dalam menit
+MAX_CONTEXT_TOKENS = 120000 
+SESSION_TIMEOUT_MINUTES = 30 
 
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 _gemini_client: genai.Client | None = None
-# Flag global untuk status layanan AI
-_ai_service_enabled = True # Defaultnya aktif
+_ai_service_enabled = True 
 
 def initialize_gemini_client():
     global _gemini_client
@@ -37,7 +38,11 @@ def initialize_gemini_client():
     try:
         _gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
         _logger.info("Klien Google GenAI berhasil diinisialisasi.")
-        # Verifikasi model opsional di sini jika diperlukan
+        # Verifikasi model opsional
+        try: _gemini_client.models.get(model=GEMINI_TEXT_MODEL_NAME); _logger.info(f"Model '{GEMINI_TEXT_MODEL_NAME}' OK.")
+        except Exception as e: _logger.warning(f"Gagal cek model '{GEMINI_TEXT_MODEL_NAME}': {e}")
+        try: _gemini_client.models.get(model=GEMINI_IMAGE_GEN_MODEL_NAME); _logger.info(f"Model '{GEMINI_IMAGE_GEN_MODEL_NAME}' OK.")
+        except Exception as e: _logger.warning(f"Gagal cek model '{GEMINI_IMAGE_GEN_MODEL_NAME}': {e}")
     except Exception as e:
         _logger.error(f"Error inisialisasi klien Google GenAI: {e}", exc_info=True)
         _gemini_client = None
@@ -49,16 +54,15 @@ class AICog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Key: channel_id, Value: ChatSession dari google-genai
-        self.active_chat_sessions: dict[int, ChatSession] = {}
-        # Key: channel_id, Value: datetime object dari aktivitas terakhir
+        # Key: channel_id, Value: objek genai.chats.Chat
+        self.active_chat_sessions: dict[int, genai.chats.Chat] = {} # PERUBAHAN TIPE ANOTASI
         self.chat_session_last_active: dict[int, datetime.datetime] = {}
-        # Key: channel_id, Value: perkiraan jumlah token dalam konteks
         self.chat_token_counts: dict[int, int] = {} 
         
-        self.session_cleanup_loop.start() # Mulai loop pembersihan sesi
+        self.session_cleanup_loop.start()
         _logger.info("AICog instance telah dibuat dan session cleanup loop dimulai.")
 
+ 
     def cog_unload(self):
         self.session_cleanup_loop.cancel() # Hentikan loop saat cog di-unload
         _logger.info("AICog di-unload dan session cleanup loop dihentikan.")
