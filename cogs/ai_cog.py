@@ -619,6 +619,6 @@ async def setup(bot: commands.Bot):
     _ai_service_enabled = True 
     cog_instance = AICog(bot)
     # Daftarkan grup command ke tree bot
-    bot.tree.add_command(cog_instance.ai_group) 
+    # bot.tree.add_command(cog_instance.ai_group) 
     await bot.add_cog(cog_instance)
     _logger.info("AICog berhasil dimuat dan grup command 'ai' ditambahkan.")
