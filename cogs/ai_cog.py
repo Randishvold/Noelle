@@ -255,9 +255,7 @@ class AICog(commands.Cog):
             async with message.channel.typing():
                 try:
                     chat_session = self.active_chat_sessions.get(message.channel.id)
-                    # --- MODIFIKASI: Ambil jumlah token saat ini ---
                     current_total_tokens = self.chat_context_token_counts.get(message.channel.id, 0)
-                    # -----------------------------------------------
 
                     if chat_session is None:
                         try: _gemini_client.models.get(model=GEMINI_TEXT_MODEL_NAME)
@@ -267,10 +265,8 @@ class AICog(commands.Cog):
                         
                         chat_session = _gemini_client.chats.create(model=GEMINI_TEXT_MODEL_NAME, history=[])
                         self.active_chat_sessions[message.channel.id] = chat_session
-                        # --- MODIFIKASI: Inisialisasi token count ---
                         self.chat_context_token_counts[message.channel.id] = 0 
-                        current_total_tokens = 0 # Update variabel lokal juga
-                        # -------------------------------------------
+                        current_total_tokens = 0
                         _logger.info(f"({context_log_prefix}) Sesi chat baru dimulai.")
                     
                     self.chat_session_last_active[message.channel.id] = datetime.datetime.now(datetime.timezone.utc)
@@ -289,56 +285,76 @@ class AICog(commands.Cog):
                                 if len(image_attachments) == 1 and not text_content: return
                     if not user_input_parts_for_api: _logger.debug(f"({context_log_prefix}) Tidak ada input valid."); return
 
-                    # --- MODIFIKASI: Hitung token input pengguna ---
-                    # Buat objek Content sementara untuk dihitung tokennya
-                    temp_user_parts_for_count = []
+                    # --- PERBAIKAN: Hitung token input pengguna ---
+                    # Buat list of Parts untuk count_tokens
+                    parts_for_counting_input = []
                     for item in user_input_parts_for_api:
-                        if isinstance(item, str): temp_user_parts_for_count.append(genai_types.Part(text=item))
-                        elif isinstance(item, Image.Image): temp_user_parts_for_count.append(item) # count_tokens bisa handle Image
+                        if isinstance(item, str):
+                            parts_for_counting_input.append(genai_types.Part(text=item))
+                        elif isinstance(item, Image.Image): # PIL.Image
+                            # Konversi PIL.Image ke Part dengan inline_data
+                            buffered = io.BytesIO()
+                            img_format = item.format if item.format else "PNG" # Default ke PNG jika format tidak diketahui
+                            try:
+                                item.save(buffered, format=img_format)
+                                img_bytes = buffered.getvalue()
+                                mime_type = Image.MIME.get(img_format) or f"image/{img_format.lower()}"
+                                parts_for_counting_input.append(genai_types.Part(inline_data=genai_types.Blob(data=img_bytes, mime_type=mime_type)))
+                            except Exception as e_pil_save:
+                                _logger.error(f"({context_log_prefix}) Gagal konversi PIL Image ke Part untuk counting: {e_pil_save}")
+                                # Jika gagal konversi, mungkin lewati part ini untuk counting atau beri nilai default
                     
-                    if temp_user_parts_for_count: # Hanya hitung jika ada parts
-                        user_input_content_for_count = genai_types.Content(parts=temp_user_parts_for_count, role="user")
+                    if parts_for_counting_input:
+                        user_input_content_for_count = genai_types.Content(parts=parts_for_counting_input, role="user")
                         try:
-                            count_resp = await asyncio.to_thread(_gemini_client.models.count_tokens, contents=[user_input_content_for_count])
+                            # --- PERBAIKAN: Tambahkan argumen 'model' ---
+                            count_resp = await asyncio.to_thread(
+                                _gemini_client.models.count_tokens, 
+                                model=GEMINI_TEXT_MODEL_NAME, # Tambahkan nama model
+                                contents=[user_input_content_for_count]
+                            )
                             current_total_tokens += count_resp.total_tokens
                         except Exception as e:
-                            _logger.error(f"({context_log_prefix}) Gagal hitung token input user: {e}")
+                            _logger.error(f"({context_log_prefix}) Gagal hitung token input user: {e}", exc_info=True) # Tambah exc_info
                     # ------------------------------------------------
 
                     api_response = await asyncio.to_thread(chat_session.send_message, message=user_input_parts_for_api)
                     _logger.info(f"({context_log_prefix}) Menerima respons dari sesi chat Gemini.")
 
-                    # --- MODIFIKASI: Hitung token output model ---
+                    # --- PERBAIKAN: Hitung token output model ---
                     if hasattr(api_response, 'candidates') and api_response.candidates and \
                        hasattr(api_response.candidates[0], 'content'):
                         model_response_content_for_count = api_response.candidates[0].content
                         try:
-                            count_resp = await asyncio.to_thread(_gemini_client.models.count_tokens, contents=[model_response_content_for_count])
+                            # --- PERBAIKAN: Tambahkan argumen 'model' ---
+                            count_resp = await asyncio.to_thread(
+                                _gemini_client.models.count_tokens, 
+                                model=GEMINI_TEXT_MODEL_NAME, # Tambahkan nama model
+                                contents=[model_response_content_for_count]
+                            )
                             current_total_tokens += count_resp.total_tokens
                         except Exception as e:
-                            _logger.error(f"({context_log_prefix}) Gagal hitung token output model: {e}")
+                            _logger.error(f"({context_log_prefix}) Gagal hitung token output model: {e}", exc_info=True) # Tambah exc_info
                     
-                    self.chat_context_token_counts[message.channel.id] = current_total_tokens # Simpan total baru
+                    self.chat_context_token_counts[message.channel.id] = current_total_tokens 
                     _logger.info(f"({context_log_prefix}) Perkiraan total token saat ini: {current_total_tokens}")
                     # -----------------------------------------------
 
                     await self._process_and_send_text_response(message, api_response, context_log_prefix, is_interaction=False)
                     
-                    # --- MODIFIKASI: Cek batas token setelah update ---
                     if current_total_tokens > MAX_CONTEXT_TOKENS:
                         _logger.warning(f"({context_log_prefix}) Konteks token ({current_total_tokens}) > batas ({MAX_CONTEXT_TOKENS}). Mereset sesi.")
                         await message.channel.send(f"✨ Sesi percakapan telah mencapai batasnya dan akan direset! ✨")
                         self._clear_session_data(message.channel.id)
-                    # ----------------------------------------------------
                     
-                # ... (blok except lainnya tetap sama) ...
                 except (InvalidArgument, FailedPrecondition) as e: _logger.warning(f"({context_log_prefix}) Error API (safety/prompt): {e}"); await message.reply(f"Permintaan tidak dapat diproses: {e}")
                 except GoogleAPIError as e: _logger.error(f"({context_log_prefix}) Error API Google: {e}", exc_info=True); await message.reply(f"Error API AI: {e}")
                 except Exception as e: _logger.error(f"({context_log_prefix}) Error tak terduga: {e}", exc_info=True); await message.reply(f"Error tak terduga: {type(e).__name__} - {e}")
             return
 
         if is_mentioned: # ... (Logika mention stateless tetap sama) ...
-            context_log_prefix = "Bot Mention" # ... (dst)
+            # ... (Tidak ada perubahan di sini karena tidak menggunakan sesi atau penghitungan token sesi) ...
+            context_log_prefix = "Bot Mention" 
             _logger.info(f"({context_log_prefix}) Memproses mention dari {message.author.name}...")
             async with message.channel.typing():
                 try:
@@ -376,13 +392,15 @@ class AICog(commands.Cog):
         if not await self._ensure_ai_channel(interaction): return
 
         channel_id = interaction.channel_id
-        if channel_id in self.active_chat_sessions : # Cek sesi aktif
+        if channel_id in self.active_chat_sessions : 
             last_active_dt = self.chat_session_last_active.get(channel_id)
             last_active_str = discord.utils.format_dt(last_active_dt, "R") if last_active_dt else "Baru saja dimulai"
             
-            # --- MODIFIKASI: Ambil dari self.chat_context_token_counts ---
             token_count_display = self.chat_context_token_counts.get(channel_id, 0)
-            # -------------------------------------------------------------
+            
+            # Jika token count 0 tapi sesi ada, coba hitung ulang dari histori internal (jika Chat object punya cara akses)
+            # Namun, karena kita tidak punya akses langsung ke Chat.history, kita tidak bisa melakukan ini.
+            # Jadi, jika token count 0, itu berarti sesi baru atau baru direset.
 
             timeout_dt = last_active_dt + datetime.timedelta(minutes=SESSION_TIMEOUT_MINUTES) if last_active_dt else None
             timeout_str = discord.utils.format_dt(timeout_dt, "R") if timeout_dt else "N/A"
@@ -390,11 +408,7 @@ class AICog(commands.Cog):
             embed = discord.Embed(title=f"Status Sesi AI - #{interaction.channel.name}", color=discord.Color.blue())
             embed.add_field(name="Status Sesi", value="Aktif", inline=False)
             embed.add_field(name="Aktivitas Terakhir", value=last_active_str, inline=True)
-            # --- MODIFIKASI: Tampilkan jumlah token yang disimpan ---
             embed.add_field(name="Perkiraan Total Token Konteks", value=f"{token_count_display} / {MAX_CONTEXT_TOKENS}", inline=True)
-            # Tidak bisa lagi menampilkan panjang histori karena tidak disimpan
-            # embed.add_field(name="Panjang Histori Tersimpan", value=f"{len(self.manual_chat_histories.get(channel_id, [])) // 2} giliran percakapan", inline=True)
-            # -----------------------------------------------------
             embed.add_field(name="Timeout Sesi Berikutnya", value=timeout_str, inline=False)
             embed.set_footer(text="Konteks akan direset jika melebihi batas token atau timeout.")
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -545,5 +559,5 @@ async def setup(bot: commands.Bot):
         return
     _ai_service_enabled = True 
     cog_instance = AICog(bot)
-    await bot.add_cog(cog_instance) # Ini sudah mendaftarkan command dalam cog_instance.ai_group
+    await bot.add_cog(cog_instance)
     _logger.info("AICog berhasil dimuat.")
