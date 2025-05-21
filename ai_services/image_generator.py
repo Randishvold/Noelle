@@ -8,47 +8,36 @@ from google.api_core.exceptions import InvalidArgument, FailedPrecondition, Goog
 import asyncio
 import io
 import logging
+import datetime # Untuk akses datetime di toggle_service
 
 from . import gemini_client as gemini_services
-import database # Untuk cek AI channel dan config
-from utils import ai_utils # Untuk mengirim teks pendamping
+from utils import ai_utils 
 
 _logger = logging.getLogger(__name__)
+# Ambil konstanta dari gemini_client.py
+SESSION_TIMEOUT_MINUTES = 30 # Atau definisikan lagi jika perlu berbeda
+MAX_CONTEXT_TOKENS = 120000
 
-class ImageGeneratorCog(commands.Cog, name="AI Image Generator"):
+class ImageGeneratorCog(commands.Cog, name="AI Image Generator & Commands"): # Ubah nama Cog
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Referensi ke MessageHandlerCog untuk akses _clear_session_data jika diperlukan
-        # Ini bisa menjadi circular dependency jika MessageHandlerCog juga impor ImageGeneratorCog
-        # Cara yang lebih baik adalah meletakkan _clear_session_data di gemini_client.py atau modul utilitas sesi.
-        # Untuk sekarang, kita anggap toggle_service di gemini_client.py sudah cukup.
         _logger.info("ImageGeneratorCog instance dibuat.")
 
     async def _ensure_ai_channel(self, interaction: discord.Interaction) -> bool:
-        # Duplikasi sementara, idealnya ini ada di utils atau diwariskan
-        # atau MessageHandlerCog bisa diakses dari sini untuk panggil metodenya
-        # (Tapi lebih baik independen jika memungkinkan)
-        if not interaction.guild_id: return False
-        config = database.get_server_config(interaction.guild_id)
-        ai_channel_id = config.get('ai_channel_id')
+        # Menggunakan nama channel yang ditetapkan secara global
+        designated_name = gemini_services.get_designated_ai_channel_name().lower()
         response_handler = interaction.response
         send_method_ephemeral = response_handler.send_message if not response_handler.is_done() else interaction.followup.send
 
-        if ai_channel_id is None:
-            await send_method_ephemeral("Channel AI belum diatur. Atur via `/config ai_channel`.", ephemeral=True)
-            return False
-        if interaction.channel_id != ai_channel_id:
-            designated_channel = self.bot.get_channel(ai_channel_id)
-            channel_mention = designated_channel.mention if designated_channel else f"channel AI ({ai_channel_id})"
-            await send_method_ephemeral(f"Perintah ini hanya dapat digunakan di {channel_mention}.", ephemeral=True)
+        if not isinstance(interaction.channel, discord.TextChannel) or \
+           interaction.channel.name.lower() != designated_name:
+            await send_method_ephemeral(
+                f"Perintah ini hanya dapat digunakan di channel bernama `{gemini_services.get_designated_ai_channel_name()}`.",
+                ephemeral=True
+            )
             return False
         return True
 
-    # --- Grup Command AI ---
-    # Kita definisikan grup di sini agar command-nya bisa menjadi bagian dari grup ini
-    # Namun, grupnya sendiri akan ditambahkan ke tree bot sekali saja (di main.py atau saat load cog pertama yg punya grup itu)
-    # Untuk struktur yang lebih rapi, semua command /ai bisa ada di satu cog ini.
-    
     ai_commands_group = app_commands.Group(name="ai", description="Perintah terkait manajemen fitur AI Noelle.")
 
     @ai_commands_group.command(name="clear_context", description="Membersihkan histori percakapan di channel AI ini.")
@@ -57,23 +46,19 @@ class ImageGeneratorCog(commands.Cog, name="AI Image Generator"):
             await interaction.response.send_message("Layanan AI sedang tidak aktif.", ephemeral=True); return
         if not await self._ensure_ai_channel(interaction): return
 
-        # Akses MessageHandlerCog untuk membersihkan sesi
-        message_handler_cog = self.bot.get_cog("AI Message Handler") # Nama cog dari MessageHandlerCog
+        message_handler_cog = self.bot.get_cog("AI Message Handler")
         if message_handler_cog and hasattr(message_handler_cog, '_clear_session_data'):
             message_handler_cog._clear_session_data(interaction.channel_id)
             await interaction.response.send_message("✨ Konteks percakapan di channel ini telah dibersihkan.", ephemeral=False)
             _logger.info(f"Konteks AI Channel {interaction.channel_id} dibersihkan oleh {interaction.user.name}.")
         else:
-            await interaction.response.send_message("Gagal membersihkan sesi (handler tidak ditemukan).", ephemeral=True)
-            _logger.error("Tidak dapat menemukan MessageHandlerCog untuk clear_context.")
-
+            await interaction.response.send_message("Gagal membersihkan sesi (handler tdk ditemukan).", ephemeral=True)
 
     @ai_commands_group.command(name="session_status", description="Menampilkan status sesi chat di channel AI ini.")
     async def ai_session_status_cmd(self, interaction: discord.Interaction):
-        if not gemini_services.is_ai_service_enabled():
-            await interaction.response.send_message("Layanan AI sedang tidak aktif.", ephemeral=True); return
+        # ... (Logika command ini sama seperti sebelumnya, hanya _ensure_ai_channel yang berubah)
+        if not gemini_services.is_ai_service_enabled(): await interaction.response.send_message("Layanan AI sedang tidak aktif.", ephemeral=True); return
         if not await self._ensure_ai_channel(interaction): return
-
         message_handler_cog = self.bot.get_cog("AI Message Handler")
         if message_handler_cog and hasattr(message_handler_cog, 'active_chat_sessions'):
             channel_id = interaction.channel_id
@@ -83,7 +68,6 @@ class ImageGeneratorCog(commands.Cog, name="AI Image Generator"):
                 token_count = message_handler_cog.chat_context_token_counts.get(channel_id, 0)
                 timeout_dt = last_active_dt + datetime.timedelta(minutes=SESSION_TIMEOUT_MINUTES) if last_active_dt else None
                 timeout_str = discord.utils.format_dt(timeout_dt, "R") if timeout_dt else "N/A"
-
                 embed = discord.Embed(title=f"Status Sesi AI - #{interaction.channel.name}", color=discord.Color.blue())
                 embed.add_field(name="Status Sesi", value="Aktif", inline=False)
                 embed.add_field(name="Aktivitas Terakhir", value=last_active_str, inline=True)
@@ -98,24 +82,35 @@ class ImageGeneratorCog(commands.Cog, name="AI Image Generator"):
     @app_commands.choices(status=[app_commands.Choice(name="Aktifkan", value="on"), app_commands.Choice(name="Nonaktifkan", value="off")])
     @commands.has_permissions(manage_guild=True)
     async def ai_toggle_service_cmd(self, interaction: discord.Interaction, status: app_commands.Choice[str]):
-        message_handler_cog = self.bot.get_cog("AI Message Handler") # Untuk akses data sesi
+        # Panggil fungsi toggle dari gemini_client.py
+        # Untuk membersihkan sesi, kita perlu referensi ke dict sesi dari MessageHandlerCog
+        message_handler_cog = self.bot.get_cog("AI Message Handler")
         if not message_handler_cog:
-             await interaction.response.send_message("Error: Komponen message handler tidak ditemukan.",ephemeral=True)
-             return
+            await interaction.response.send_message("Error internal: Message handler tidak ditemukan.", ephemeral=True)
+            return
 
-        response_message = gemini_services.toggle_ai_service(
-            status.value == "on",
-            message_handler_cog.active_chat_sessions, # Pass referensi dict
-            message_handler_cog.chat_session_last_active,
-            message_handler_cog.chat_context_token_counts
+        response_message = gemini_services.toggle_ai_service_status(
+            status.value == "on"
         )
-        await interaction.response.send_message(response_message, ephemeral=False if "berhasil" in response_message.lower() else True)
+        # Jika layanan diaktifkan/dinonaktifkan, MessageHandlerCog harus membersihkan sesinya sendiri
+        # berdasarkan status baru dari gemini_services.is_ai_service_enabled()
+        # Atau, kita bisa panggil _clear_session_data di sini setelah status diubah
+        if status.value == "off" or (status.value == "on" and gemini_services.is_ai_service_enabled()):
+             for ch_id in list(message_handler_cog.active_chat_sessions.keys()):
+                 message_handler_cog._clear_session_data(ch_id)
+             if status.value == "off":
+                 response_message += " Semua sesi chat aktif telah dihentikan."
+             else:
+                 response_message += " Semua sesi chat sebelumnya telah direset."
 
+        await interaction.response.send_message(response_message, ephemeral=False if "berhasil" in response_message.lower() or "diaktifkan" in response_message.lower() or "dinonaktifkan" in response_message.lower() else True)
 
-    @app_commands.command(name='generate_image', description='Membuat gambar dari teks di AI Channel.')
+    @app_commands.command(name='generate_image', description='Membuat gambar dari teks di channel AI.')
     @app_commands.describe(prompt='Deskripsikan gambar yang ingin Anda buat.')
-    @app_commands.guild_only() # Pastikan hanya di guild
+    @app_commands.guild_only()
     async def generate_image_command(self, interaction: discord.Interaction, prompt: str):
+        # ... (Logika command ini sama seperti versi sebelumnya, pastikan _ensure_ai_channel dipanggil) ...
+        # ... (dan pastikan _process_gemini_response dipanggil dengan benar untuk teks pendamping) ...
         if not gemini_services.is_ai_service_enabled():
             await interaction.response.send_message("Layanan AI sedang tidak aktif.", ephemeral=True); return
         
@@ -123,7 +118,7 @@ class ImageGeneratorCog(commands.Cog, name="AI Image Generator"):
         if client is None:
             await interaction.response.send_message("Klien AI tidak terinisialisasi.", ephemeral=True); return
 
-        if not await self._ensure_ai_channel(interaction): return # Validasi AI Channel
+        if not await self._ensure_ai_channel(interaction): return
 
         if not prompt.strip():
             await interaction.response.send_message("Mohon berikan deskripsi gambar.", ephemeral=True); return
@@ -132,13 +127,9 @@ class ImageGeneratorCog(commands.Cog, name="AI Image Generator"):
 
         try:
             _logger.info(f"IMAGE_GEN: Memanggil model gambar Gemini dengan prompt: '{prompt}'.")
-            config_obj = genai_types.GenerateContentConfig(
-                response_modalities=[genai_types.Modality.TEXT, genai_types.Modality.IMAGE]
-            )
+            config_obj = genai_types.GenerateContentConfig(response_modalities=[genai_types.Modality.TEXT, genai_types.Modality.IMAGE])
             api_response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=gemini_services.GEMINI_IMAGE_GEN_MODEL_NAME, contents=prompt, config=config_obj
-            )
+                client.models.generate_content, model=gemini_services.GEMINI_IMAGE_GEN_MODEL_NAME, contents=prompt, config=config_obj)
             _logger.info("IMAGE_GEN: Menerima respons dari API gambar Gemini.")
 
             text_parts, img_bytes, mime_type = [], None, "image/png"
@@ -149,54 +140,42 @@ class ImageGeneratorCog(commands.Cog, name="AI Image Generator"):
                         if part.text: text_parts.append(part.text)
                         elif part.inline_data and part.inline_data.mime_type.startswith('image/'):
                             img_bytes, mime_type = part.inline_data.data, part.inline_data.mime_type
-                            _logger.info(f"IMAGE_GEN: Diterima inline_data gambar (MIME: {mime_type}).")
-            
             final_text = "\n".join(text_parts).strip()
 
             if img_bytes:
-                ext = mime_type.split('/')[-1] or 'png'
-                img_file = discord.File(io.BytesIO(img_bytes), filename=f"gemini_art.{ext}")
-                title = "Gambar Dihasilkan oleh Noelle ✨"
-                prompt_desc = f"**Prompt:** \"{discord.utils.escape_markdown(prompt[:1000])}{'...' if len(prompt)>1000 else ''}\""
+                ext = mime_type.split('/')[-1] or 'png'; img_file = discord.File(io.BytesIO(img_bytes), filename=f"gemini_art.{ext}")
+                title = "Gambar Dihasilkan ✨"; prompt_desc = f"**Prompt:** \"{discord.utils.escape_markdown(prompt[:1000])}{'...' if len(prompt)>1000 else ''}\""
                 img_embed = discord.Embed(title=title, description=prompt_desc, color=discord.Color.random())
-                img_embed.set_image(url=f"attachment://{img_file.filename}")
-                img_embed.set_footer(text=f"Diminta oleh: {interaction.user.display_name}")
+                img_embed.set_image(url=f"attachment://{img_file.filename}"); img_embed.set_footer(text=f"Oleh: {interaction.user.display_name}")
                 await interaction.followup.send(embed=img_embed, file=img_file)
                 _logger.info(f"IMAGE_GEN: Gambar terkirim untuk prompt: {prompt}")
 
-                if final_text: # Kirim teks pendamping jika ada
+                if final_text:
                     _logger.info("IMAGE_GEN: Mengirim teks pendamping gambar...")
-                    # Gunakan _process_gemini_response dari MessageHandlerCog (atau ai_utils)
-                    # Ini agak rumit jika cog dipisah, idealnya _process_gemini_response ada di ai_utils
-                    message_handler_cog = self.bot.get_cog("AI Message Handler")
-                    if message_handler_cog:
-                        # Buat dummy response object untuk teks
-                        dummy_text_part = genai_types.Part(text=final_text)
-                        dummy_content = genai_types.Content(parts=[dummy_text_part], role="model")
-                        dummy_candidate = genai_types.Candidate(content=dummy_content, finish_reason=genai_types.FinishReason.STOP, index=0)
-                        dummy_response_for_text = genai_types.GenerateContentResponse(candidates=[dummy_candidate])
-                        await message_handler_cog._process_gemini_response(interaction, dummy_response_for_text, "Info Tambahan Gambar", is_interaction=True)
-                    else: # Fallback jika MessageHandlerCog tidak ditemukan
-                        await interaction.channel.send(f"**Info Tambahan:**\n{final_text[:1900]}")
-
-            elif final_text:
+                    # Panggil ai_utils untuk mengirim teks ini
+                    await ai_utils.send_text_in_embeds(
+                        target_channel=interaction.channel, # Kirim ke channel interaksi
+                        response_text=final_text,
+                        title_prefix="Info Tambahan Gambar",
+                        footer_text=f"Untuk gambar dari: {interaction.user.display_name}",
+                        reply_to_message=None, # Bukan reply
+                        interaction_to_followup=None # Bukan followup lagi
+                    )
+            elif final_text: # Hanya teks
                 _logger.warning(f"IMAGE_GEN: Hanya teks, tidak ada gambar. Prompt: '{prompt}'")
-                message_handler_cog = self.bot.get_cog("AI Message Handler")
-                if message_handler_cog:
-                    dummy_text_part = genai_types.Part(text=final_text) # ... (buat dummy response seperti di atas)
-                    dummy_content = genai_types.Content(parts=[dummy_text_part], role="model")
-                    dummy_candidate = genai_types.Candidate(content=dummy_content, finish_reason=genai_types.FinishReason.STOP, index=0)
-                    dummy_response_for_text = genai_types.GenerateContentResponse(candidates=[dummy_candidate])
-                    await message_handler_cog._process_gemini_response(interaction, dummy_response_for_text, "Image Gen Text-Only", is_interaction=True)
-                else:
-                    await interaction.followup.send(f"AI merespons (tanpa gambar):\n{final_text[:1900]}", ephemeral=True)
-            else: # Tidak ada gambar maupun teks
-                # ... (penanganan prompt_feedback seperti sebelumnya) ...
+                await ai_utils.send_text_in_embeds(
+                    target_channel=interaction.channel, # Kirim ke channel interaksi
+                    response_text=final_text,
+                    title_prefix="Respons AI (Tanpa Gambar)",
+                    footer_text=f"Untuk prompt gambar dari: {interaction.user.display_name}",
+                    reply_to_message=None, 
+                    interaction_to_followup=interaction # Ini adalah respons utama, jadi bisa followup
+                )
+            else: # Tidak ada output
                 if api_response.prompt_feedback and api_response.prompt_feedback.block_reason != genai_types.BlockedReason.BLOCKED_REASON_UNSPECIFIED:
                     block_name = genai_types.BlockedReason(api_response.prompt_feedback.block_reason).name
                     await interaction.followup.send(f"Permintaan gambar diblokir ({block_name}).", ephemeral=True)
-                else:
-                    await interaction.followup.send("Gagal hasilkan gambar (respons kosong).", ephemeral=True)
+                else: await interaction.followup.send("Gagal hasilkan gambar (respons kosong).", ephemeral=True)
         except (InvalidArgument, FailedPrecondition) as e: await interaction.followup.send(f"Permintaan tidak dapat diproses: {e}", ephemeral=True)
         except GoogleAPIError as e: await interaction.followup.send(f"Error API AI: {e}", ephemeral=True)
         except Exception as e: await interaction.followup.send(f"Error tak terduga: {type(e).__name__} - {e}", ephemeral=True)
