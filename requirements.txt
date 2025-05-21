@@ -1,7 +1,5 @@
 discord.py
 python-dotenv
-asyncio
-pymongo
 google-genai
 google-api-core
-pillow
+Pillow
