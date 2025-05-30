@@ -172,3 +172,16 @@ class MessageHandlerCog(commands.Cog, name="AI Message Handler"):
             except (InvalidArgument, FailedPrecondition) as e: _logger.warning(f"({context_log_prefix}) Error API (safety/prompt): {e}"); await message.reply(f"Permintaan tidak dapat diproses: {e}")
             except GoogleAPIError as e: _logger.error(f"({context_log_prefix}) Error API Google: {e}", exc_info=True); await message.reply(f"Error API AI: {e}")
             except Exception as e: _logger.error(f"({context_log_prefix}) Error tak terduga: {e}", exc_info=True); await message.reply(f"Error tak terduga: {type(e).__name__} - {e}")
+
+async def setup(bot: commands.Bot):
+    # Pastikan klien Gemini sudah siap sebelum menambah cog ini
+    # karena cog ini sangat bergantung pada klien.
+    client = gemini_services.get_gemini_client()
+    if client is None or not gemini_services.is_ai_service_enabled():
+        _logger.error("MessageHandlerCog: Klien Gemini tidak siap atau layanan AI tidak aktif. Cog tidak akan dimuat.")
+        # Bisa raise error agar load_extension gagal, atau biarkan bot jalan tanpa cog ini
+        # raise commands.ExtensionFailed("MessageHandlerCog: Klien Gemini tidak siap.")
+        return # Tidak jadi memuat cog jika klien tidak ada
+        
+    await bot.add_cog(MessageHandlerCog(bot))
+    _logger.info(f"{MessageHandlerCog.__name__} (AI Channel Handler) Cog berhasil dimuat.")

@@ -200,3 +200,13 @@ class ImageGeneratorCog(commands.Cog, name="AI Image Generator & Commands"): # U
              try: await interaction.channel.send(f"{interaction.user.mention}, error: {error_message}")
              except Exception as ch_e: _logger.error(f"Gagal kirim error ke channel utk cmd '{command_name}': {ch_e}", exc_info=True)
         except Exception as e: _logger.error(f"Gagal kirim pesan error utk cmd '{command_name}': {e}", exc_info=True)
+
+async def setup(bot: commands.Bot):
+    client = gemini_services.get_gemini_client()
+    if client is None or not gemini_services.is_ai_service_enabled():
+        _logger.error("ImageGeneratorCog: Klien Gemini tidak siap atau layanan AI tidak aktif. Cog tidak akan dimuat.")
+        return
+
+    cog_instance = ImageGeneratorCog(bot)
+    await bot.add_cog(cog_instance)
+    _logger.info(f"{ImageGeneratorCog.__name__} Cog berhasil dimuat.")

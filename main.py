@@ -31,37 +31,30 @@ intents.members = True # Sesuaikan jika tidak butuh
 
 bot = commands.Bot(command_prefix="noelleai!", intents=intents) # Ganti prefix jika mau
 
+# Noelle_AI_Bot/main.py
+# ... (impor dan kode lainnya tetap sama) ...
+
 AI_COGS_TO_LOAD = [
-    "ai_services.message_handler", # Mengandung MessageHandlerCog
-    "ai_services.mention_handler", # Mengandung MentionHandlerCog
-    "ai_services.image_generator", # Mengandung ImageGeneratorCog (dengan grup /ai dan /generate_image)
+    "ai_services.message_handler",
+    "ai_services.mention_handler",
+    "ai_services.image_generator", 
 ]
 
-ai_group_registered_flag = False # Flag untuk memastikan grup /ai hanya didaftarkan sekali
-
 async def load_cogs():
-    global ai_group_registered_flag
+    # global ai_group_registered # Tidak perlu lagi
     for cog_path in AI_COGS_TO_LOAD:
         try:
-            await bot.load_extension(cog_path)
-            _logger.info(f"Cog AI berhasil dimuat: {cog_path}")
-
-            # Daftarkan grup /ai dari ImageGeneratorCog sekali saja
-            if cog_path == "ai_services.image_generator" and not ai_group_registered_flag:
-                cog_instance = bot.get_cog("AI Image Generator & Commands") # Sesuaikan dengan nama Cog
-                if cog_instance and hasattr(cog_instance, 'ai_commands_group'):
-                    bot.tree.add_command(cog_instance.ai_commands_group) # Tambahkan grup ke tree
-                    _logger.info("Grup command '/ai' berhasil ditambahkan ke tree.")
-                    ai_group_registered_flag = True
-                elif cog_instance:
-                     _logger.warning(f"Cog '{cog_path}' dimuat tapi tidak memiliki 'ai_commands_group'.")
-                else:
-                    _logger.warning(f"Cog '{cog_path}' tidak ditemukan setelah load untuk registrasi grup.")
+            await bot.load_extension(cog_path) # Cukup ini, fungsi setup di cog akan menangani sisanya
+            _logger.info(f"Berhasil memuat cog AI: {cog_path}")
 
         except commands.ExtensionAlreadyLoaded:
             _logger.warning(f"Cog AI '{cog_path}' sudah dimuat.")
+        except commands.NoEntryPointError: # Tangani error ini secara spesifik
+             _logger.error(f"GAGAL MUAT: Ekstensi '{cog_path}' tidak memiliki fungsi 'setup'.")
+        except commands.ExtensionFailed as e: # Tangani error jika setup di cog raise ExtensionFailed
+            _logger.error(f"GAGAL MUAT: Fungsi 'setup' di '{cog_path}' gagal: {e.name} - {e.original}", exc_info=False) # Jangan tampilkan traceback penuh jika sudah ditangani
         except Exception as e:
-            _logger.error(f"Gagal memuat Cog AI {cog_path}: {e}", exc_info=True)
+            _logger.error(f"Gagal memuat cog AI {cog_path}: {type(e).__name__} - {e}", exc_info=True)
 
 @bot.event
 async def on_ready():
