@@ -26,7 +26,7 @@ if not DISCORD_TOKEN:
 
 # Inisialisasi modul penting (klien Gemini dan koneksi DB)
 from ai_services import gemini_client as gemini_services 
-import database # Ini akan mencoba connect_to_mongo() jika dipanggil
+from core import database # Ini akan mencoba connect_to_mongo() jika dipanggil
 
 intents = discord.Intents.default()
 intents.message_content = True
