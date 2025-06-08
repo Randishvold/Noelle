@@ -27,7 +27,7 @@ class BasicEmbedModal(ui.Modal, title='Edit Info Dasar Embed'):
         elif isinstance(color_val, str): self.embed_color.default = color_val
 
     async def on_submit(self, interaction: discord.Interaction):
-        current_data = database.get_custom_embed(self.guild_id, self.embed_name) or {}
+        current_data = await database.get_custom_embed(self.guild_id, self.embed_name) or {}
         title = self.embed_title.value.strip()
         description = self.embed_description.value.strip()
         color_str = self.embed_color.value.strip()
@@ -41,10 +41,10 @@ class BasicEmbedModal(ui.Modal, title='Edit Info Dasar Embed'):
         if not description and 'description' in current_data: del current_data['description']
         if color_int is None and 'color' in current_data: del current_data['color']
             
-        database.save_custom_embed(self.guild_id, self.embed_name, current_data)
-        updated_data = database.get_custom_embed(self.guild_id, self.embed_name)
-        processed_embed = general_utils.create_processed_embed(updated_data, interaction.user, interaction.user, interaction.guild, interaction.channel)
-        await interaction.response.edit_message(content="Info dasar embed berhasil diperbarui!", embed=processed_embed)
+        await database.save_custom_embed(self.guild_id, self.embed_name, current_data) # <--- AWAIT
+        updated_data = await database.get_custom_embed(self.guild_id, self.embed_name) # <--- AWAIT
+        processed_embed = general_utils.create_processed_embed(updated_data, ...)
+        await interaction.response.edit_message(content="...", embed=processed_embed)
 
 
 class AuthorEmbedModal(ui.Modal, title='Edit Author Embed'):
@@ -75,8 +75,8 @@ class AuthorEmbedModal(ui.Modal, title='Edit Author Embed'):
         elif 'author' in current_data: 
             del current_data['author']
             
-        database.save_custom_embed(self.guild_id, self.embed_name, current_data)
-        updated_data = database.get_custom_embed(self.guild_id, self.embed_name)
+        await database.save_custom_embed(self.guild_id, self.embed_name, current_data)
+        updated_data = await database.get_custom_embed(self.guild_id, self.embed_name)
         
         # Panggil create_processed_embed. Jika icon_url tidak valid setelah replace_variables,
         # create_processed_embed akan mencoba membuat embed tanpa icon_url atau error.
@@ -120,8 +120,8 @@ class FooterEmbedModal(ui.Modal, title='Edit Footer Embed'):
         elif 'footer' in current_data: # Jika tidak ada teks dan timestamp tidak true, hapus footer
             del current_data['footer']
             
-        database.save_custom_embed(self.guild_id, self.embed_name, current_data)
-        updated_data = database.get_custom_embed(self.guild_id, self.embed_name)
+        await database.save_custom_embed(self.guild_id, self.embed_name, current_data)
+        updated_data = await database.get_custom_embed(self.guild_id, self.embed_name)
         processed_embed = general_utils.create_processed_embed(updated_data, interaction.user, interaction.user, interaction.guild, interaction.channel)
         await interaction.response.edit_message(content="Footer embed berhasil diperbarui!", embed=processed_embed)
 

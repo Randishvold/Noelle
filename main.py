@@ -86,9 +86,9 @@ async def on_ready():
     _logger.info(f'Terhubung ke {len(bot.guilds)} guilds.')
 
     # Coba koneksi ke database saat ready jika belum
-    if not database._mongo_client: # Cek apakah klien sudah ada
+    if not database.get_db_status(): # Cek status
         _logger.info("Mencoba koneksi ke MongoDB saat on_ready...")
-        database.connect_to_mongo()
+        await database.connect_to_mongo()
 
     if not gemini_services.is_ai_service_enabled():
         _logger.warning("Layanan AI tidak aktif atau klien Gemini tidak terinisialisasi.")
@@ -169,10 +169,9 @@ async def custom_help_command(ctx: commands.Context, *, command_name: str = None
 
 async def main_async():
     async with bot:
-        # Inisialisasi koneksi database di sini jika belum dari modul database
-        if not database._mongo_client:
+        if not database.get_db_status():
             _logger.info("Mencoba koneksi awal ke MongoDB...")
-            if not database.connect_to_mongo():
+            if not await database.connect_to_mongo(): # Gunakan await
                 _logger.warning("Gagal koneksi ke MongoDB. Fitur database mungkin tidak berfungsi.")
         
         await bot.start(DISCORD_TOKEN)
@@ -183,6 +182,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         _logger.info("Bot Noelle dihentikan.")
     finally:
-        if hasattr(database, 'close_mongo_connection'): # Pastikan modul database punya fungsi ini
-            database.close_mongo_connection()
+        if database.get_db_status():
+            try:
+                asyncio.run(database.close_mongo_connection())
+            except RuntimeError: # Loop mungkin sudah tertutup
+                pass
         _logger.info("Proses bot selesai.")
