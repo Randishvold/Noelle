@@ -11,7 +11,6 @@ DATABASE_NAME = 'noelle_bot_db'
 EMBEDS_COLLECTION_NAME = 'custom_embeds'
 CONFIGS_COLLECTION_NAME = 'server_configs'
 
-# Variabel global untuk klien dan koleksi
 _mongo_client: AsyncIOMotorClient | None = None
 _db: AsyncIOMotorDatabase | None = None
 _embeds_collection: AsyncIOMotorCollection | None = None
@@ -23,23 +22,17 @@ DEFAULT_SERVER_CONFIG = {
 }
 
 async def connect_to_mongo() -> bool:
-    """
-    Menghubungkan ke MongoDB secara asinkron.
-    Menginisialisasi klien, database, dan koleksi.
-    Mengembalikan True jika berhasil, False jika gagal.
-    """
     global _mongo_client, _db, _embeds_collection, _configs_collection
     if not MONGO_URI:
         _logger.error("MONGODB_URI tidak diatur. Fitur database tidak akan berfungsi.")
         return False
     
-    if _mongo_client: # Jika sudah ada klien, tidak perlu konek lagi
+    if _mongo_client:
         return True
 
     try:
         _logger.info("Mencoba koneksi ke MongoDB secara asinkron...")
         _mongo_client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-        # Perintah ismaster adalah cara cepat untuk memverifikasi koneksi
         await _mongo_client.admin.command('ismaster') 
         _logger.info("Koneksi MongoDB (motor) berhasil!")
         
@@ -47,7 +40,6 @@ async def connect_to_mongo() -> bool:
         _embeds_collection = _db[EMBEDS_COLLECTION_NAME]
         _configs_collection = _db[CONFIGS_COLLECTION_NAME]
 
-        # Pastikan index ada (operasi non-blocking di background)
         await _embeds_collection.create_index([("guild_id", 1), ("embed_name", 1)], unique=True, background=True)
         _logger.info(f"Index unik dipastikan pada koleksi '{EMBEDS_COLLECTION_NAME}'.")
         await _configs_collection.create_index([("guild_id", 1)], unique=True, background=True)
@@ -59,16 +51,13 @@ async def connect_to_mongo() -> bool:
     except PyMongoError as e:
         _logger.error(f"Error PyMongo/Motor saat koneksi: {e}")
     
-    # Reset semua jika gagal
     _mongo_client = _db = _embeds_collection = _configs_collection = None
     return False
 
 def get_db_status() -> bool:
-    """Mengecek apakah klien database sudah terhubung."""
     return _mongo_client is not None
 
 async def close_mongo_connection():
-    """Menutup koneksi MongoDB."""
     global _mongo_client
     if _mongo_client:
         _mongo_client.close()
@@ -78,7 +67,8 @@ async def close_mongo_connection():
 # --- Fungsi CRUD Asinkron untuk Embeds ---
 
 async def save_custom_embed(guild_id: int, embed_name: str, embed_data: dict) -> bool:
-    if not _embeds_collection:
+    # --- PERBAIKAN: Gunakan 'is None' ---
+    if _embeds_collection is None:
         _logger.error("Embeds collection tidak tersedia untuk save_custom_embed.")
         return False
     try:
@@ -92,7 +82,8 @@ async def save_custom_embed(guild_id: int, embed_name: str, embed_data: dict) ->
         return False
 
 async def get_custom_embed(guild_id: int, embed_name: str) -> dict | None:
-    if not _embeds_collection:
+    # --- PERBAIKAN: Gunakan 'is None' ---
+    if _embeds_collection is None:
         _logger.error("Embeds collection tidak tersedia untuk get_custom_embed.")
         return None
     try:
@@ -102,18 +93,21 @@ async def get_custom_embed(guild_id: int, embed_name: str) -> dict | None:
         return None
 
 async def get_all_custom_embed_names(guild_id: int) -> list[str]:
-    if not _embeds_collection:
+    # --- PERBAIKAN: Gunakan 'is None' ---
+    if _embeds_collection is None:
         _logger.error("Embeds collection tidak tersedia untuk get_all_custom_embed_names.")
         return []
     try:
         cursor = _embeds_collection.find({'guild_id': guild_id}, {'embed_name': 1, '_id': 0})
+        # Batas `length` bisa disesuaikan jika kamu berencana punya > 100 embed per server
         return [doc['embed_name'] for doc in await cursor.to_list(length=100) if 'embed_name' in doc]
     except PyMongoError as e:
         _logger.error(f"Error get_all_custom_embed_names: {e}")
         return []
 
 async def delete_custom_embed(guild_id: int, embed_name: str) -> bool:
-    if not _embeds_collection:
+    # --- PERBAIKAN: Gunakan 'is None' ---
+    if _embeds_collection is None:
         _logger.error("Embeds collection tidak tersedia untuk delete_custom_embed.")
         return False
     try:
@@ -126,7 +120,8 @@ async def delete_custom_embed(guild_id: int, embed_name: str) -> bool:
 # --- Fungsi CRUD Asinkron untuk Server Configs ---
 
 async def get_server_config(guild_id: int) -> dict:
-    if not _configs_collection:
+    # --- PERBAIKAN: Gunakan 'is None' ---
+    if _configs_collection is None:
         _logger.warning("Configs collection tidak tersedia, mengembalikan config default.")
         return DEFAULT_SERVER_CONFIG.copy()
     try:
@@ -145,7 +140,8 @@ async def get_server_config(guild_id: int) -> dict:
     return DEFAULT_SERVER_CONFIG.copy()
 
 async def update_server_config(guild_id: int, settings_to_update: dict) -> bool:
-    if not _configs_collection:
+    # --- PERBAIKAN: Gunakan 'is None' ---
+    if _configs_collection is None:
         _logger.error("Configs collection tidak tersedia untuk update_server_config.")
         return False
     try:

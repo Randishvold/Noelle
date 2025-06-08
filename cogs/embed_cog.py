@@ -4,15 +4,13 @@ from discord.ext import commands
 from discord import app_commands, ui
 import logging
 from core import database
-from utils import general_utils # Pastikan ini diimpor
+from utils import general_utils
 
 _logger = logging.getLogger("noelle_bot.embed")
 
 class BasicEmbedModal(ui.Modal, title='Edit Info Dasar Embed'):
     embed_title = ui.TextInput(label='Judul', style=discord.TextStyle.short, required=False, max_length=256)
-    # --- PERBAIKAN MAX_LENGTH ---
-    embed_description = ui.TextInput(label='Deskripsi', style=discord.TextStyle.long, required=False, max_length=4000) 
-    # --------------------------
+    embed_description = ui.TextInput(label='Deskripsi', style=discord.TextStyle.long, required=False, max_length=4000)
     embed_color = ui.TextInput(label='Warna (Hex: #RRGGBB)', style=discord.TextStyle.short, required=False, max_length=7)
 
     def __init__(self, embed_name: str, guild_id: int, initial_data: dict | None = None):
@@ -41,15 +39,23 @@ class BasicEmbedModal(ui.Modal, title='Edit Info Dasar Embed'):
         if not description and 'description' in current_data: del current_data['description']
         if color_int is None and 'color' in current_data: del current_data['color']
             
-        await database.save_custom_embed(self.guild_id, self.embed_name, current_data) # <--- AWAIT
-        updated_data = await database.get_custom_embed(self.guild_id, self.embed_name) # <--- AWAIT
-        processed_embed = general_utils.create_processed_embed(updated_data, ...)
-        await interaction.response.edit_message(content="...", embed=processed_embed)
+        await database.save_custom_embed(self.guild_id, self.embed_name, current_data)
+        updated_data = await database.get_custom_embed(self.guild_id, self.embed_name)
+        
+        # --- PERBAIKAN: Ganti placeholder '...' dengan argumen yang benar ---
+        processed_embed = general_utils.create_processed_embed(
+            updated_data, 
+            interaction.user, 
+            interaction.user,
+            interaction.guild, 
+            interaction.channel
+        )
+        await interaction.response.edit_message(content="Info dasar embed berhasil diperbarui!", embed=processed_embed)
 
 
 class AuthorEmbedModal(ui.Modal, title='Edit Author Embed'):
     author_name = ui.TextInput(label='Nama Author', style=discord.TextStyle.short, required=False, max_length=256)
-    author_icon_url = ui.TextInput(label='URL Ikon Author (Variabel didukung)', style=discord.TextStyle.short, required=False, placeholder="Contoh: {{user.avatar_url}}") # Tambah placeholder
+    author_icon_url = ui.TextInput(label='URL Ikon Author (Variabel didukung)', style=discord.TextStyle.short, required=False, placeholder="Contoh: {{user.avatar_url}}")
 
     def __init__(self, embed_name: str, guild_id: int, initial_data: dict | None = None):
         super().__init__(timeout=300)
@@ -60,15 +66,14 @@ class AuthorEmbedModal(ui.Modal, title='Edit Author Embed'):
         self.author_icon_url.default = author_data.get('icon_url', '')
 
     async def on_submit(self, interaction: discord.Interaction):
-        current_data = database.get_custom_embed(self.guild_id, self.embed_name) or {}
+        # --- PERBAIKAN: Tambahkan 'await' ---
+        current_data = await database.get_custom_embed(self.guild_id, self.embed_name) or {}
         name = self.author_name.value.strip()
         icon_url_input = self.author_icon_url.value.strip()
         
         author_dict = {}
-        if name:
-            author_dict['name'] = name
-        if icon_url_input:
-            author_dict['icon_url'] = icon_url_input # Simpan apa adanya, biarkan create_processed_embed yang validasi
+        if name: author_dict['name'] = name
+        if icon_url_input: author_dict['icon_url'] = icon_url_input
 
         if author_dict:
             current_data['author'] = author_dict
@@ -78,20 +83,11 @@ class AuthorEmbedModal(ui.Modal, title='Edit Author Embed'):
         await database.save_custom_embed(self.guild_id, self.embed_name, current_data)
         updated_data = await database.get_custom_embed(self.guild_id, self.embed_name)
         
-        # Panggil create_processed_embed. Jika icon_url tidak valid setelah replace_variables,
-        # create_processed_embed akan mencoba membuat embed tanpa icon_url atau error.
-        # Kita ingin errornya ditangani oleh error handler cog.
         processed_embed = general_utils.create_processed_embed(
-            updated_data, 
-            interaction.user, 
-            interaction.user, # Di modal, member = user
-            interaction.guild, 
-            interaction.channel
+            updated_data, interaction.user, interaction.user, interaction.guild, interaction.channel
         )
         await interaction.response.edit_message(content="Author embed berhasil diperbarui!", embed=processed_embed)
 
-# ... (FooterEmbedModal, EmbedEditView, dan sisa EmbedCog tetap sama) ...
-# Pastikan `FooterEmbedModal` juga memiliki logika on_submit yang serupa:
 class FooterEmbedModal(ui.Modal, title='Edit Footer Embed'):
     footer_text = ui.TextInput(label='Teks Footer', style=discord.TextStyle.short, required=False, max_length=2048)
     add_timestamp = ui.TextInput(label='Tambahkan Timestamp? (yes/no)', style=discord.TextStyle.short, required=False, max_length=3, placeholder="yes atau no")
@@ -105,19 +101,18 @@ class FooterEmbedModal(ui.Modal, title='Edit Footer Embed'):
         self.add_timestamp.default = 'yes' if footer_data.get('timestamp') is True else 'no'
 
     async def on_submit(self, interaction: discord.Interaction):
-        current_data = database.get_custom_embed(self.guild_id, self.embed_name) or {}
+        # --- PERBAIKAN: Tambahkan 'await' ---
+        current_data = await database.get_custom_embed(self.guild_id, self.embed_name) or {}
         text = self.footer_text.value.strip()
         show_ts = self.add_timestamp.value.strip().lower() == 'yes'
         
         footer_dict = {}
-        if text:
-            footer_dict['text'] = text
-        # Selalu set 'timestamp' agar create_processed_embed tahu apakah harus menambahkannya
+        if text: footer_dict['text'] = text
         footer_dict['timestamp'] = show_ts
             
         if footer_dict.get('text') or footer_dict.get('timestamp'):
              current_data['footer'] = footer_dict
-        elif 'footer' in current_data: # Jika tidak ada teks dan timestamp tidak true, hapus footer
+        elif 'footer' in current_data:
             del current_data['footer']
             
         await database.save_custom_embed(self.guild_id, self.embed_name, current_data)
@@ -125,13 +120,11 @@ class FooterEmbedModal(ui.Modal, title='Edit Footer Embed'):
         processed_embed = general_utils.create_processed_embed(updated_data, interaction.user, interaction.user, interaction.guild, interaction.channel)
         await interaction.response.edit_message(content="Footer embed berhasil diperbarui!", embed=processed_embed)
 
-# ... (EmbedEditView dan sisa EmbedCog sama seperti versi sebelumnya) ...
 class EmbedEditView(ui.View):
-    def __init__(self, embed_name: str, guild_id: int, *, timeout=300): # Hapus interaction_message
+    def __init__(self, embed_name: str, guild_id: int, *, timeout=300):
         super().__init__(timeout=timeout)
         self.embed_name = embed_name
         self.guild_id = guild_id
-        # self.message akan diset oleh discord.py saat view dikirim
 
     async def on_timeout(self) -> None:
         if self.message: 
@@ -146,17 +139,20 @@ class EmbedEditView(ui.View):
 
     @ui.button(label='Info Dasar', style=discord.ButtonStyle.primary, custom_id="edit_basic_embed_v2") 
     async def edit_basic_button(self, interaction: discord.Interaction, button: ui.Button):
-        current_data = database.get_custom_embed(self.guild_id, self.embed_name)
+        # --- PERBAIKAN: Tambahkan 'await' ---
+        current_data = await database.get_custom_embed(self.guild_id, self.embed_name)
         await interaction.response.send_modal(BasicEmbedModal(self.embed_name, self.guild_id, current_data))
 
     @ui.button(label='Author', style=discord.ButtonStyle.secondary, custom_id="edit_author_embed_v2") 
     async def edit_author_button(self, interaction: discord.Interaction, button: ui.Button):
-        current_data = database.get_custom_embed(self.guild_id, self.embed_name)
+        # --- PERBAIKAN: Tambahkan 'await' ---
+        current_data = await database.get_custom_embed(self.guild_id, self.embed_name)
         await interaction.response.send_modal(AuthorEmbedModal(self.embed_name, self.guild_id, current_data))
 
     @ui.button(label='Footer', style=discord.ButtonStyle.secondary, custom_id="edit_footer_embed_v2") 
     async def edit_footer_button(self, interaction: discord.Interaction, button: ui.Button):
-        current_data = database.get_custom_embed(self.guild_id, self.embed_name)
+        # --- PERBAIKAN: Tambahkan 'await' ---
+        current_data = await database.get_custom_embed(self.guild_id, self.embed_name)
         await interaction.response.send_modal(FooterEmbedModal(self.embed_name, self.guild_id, current_data))
     
 class EmbedCog(commands.Cog, name="Custom Embeds"):
@@ -169,7 +165,8 @@ class EmbedCog(commands.Cog, name="Custom Embeds"):
         guild = member.guild
         target_channel = guild.system_channel
         if target_channel:
-            welcome_embed_data = database.get_custom_embed(guild.id, "welcome")
+            # --- PERBAIKAN: Tambahkan 'await' ---
+            welcome_embed_data = await database.get_custom_embed(guild.id, "welcome")
             if welcome_embed_data:
                 try:
                     embed = general_utils.create_processed_embed(welcome_embed_data, member=member, guild=guild, channel=target_channel)
@@ -188,12 +185,17 @@ class EmbedCog(commands.Cog, name="Custom Embeds"):
         if not interaction.guild_id: return await interaction.response.send_message("Hanya di server.", ephemeral=True)
         nama = nama.lower().strip()
         if not nama: return await interaction.response.send_message("Nama embed tidak boleh kosong.", ephemeral=True)
-        if database.get_custom_embed(interaction.guild_id, nama):
+        
+        # --- PERBAIKAN: Tambahkan 'await' ---
+        if await database.get_custom_embed(interaction.guild_id, nama):
             return await interaction.response.send_message(f"Embed '{nama}' sudah ada. Gunakan `/embed edit`.", ephemeral=True)
+        
         initial_data = {"title": f"Embed Baru: {nama}", "description": "Mulai edit embed ini!"}
-        if database.save_custom_embed(interaction.guild_id, nama, initial_data):
+        
+        # --- PERBAIKAN: Tambahkan 'await' ---
+        if await database.save_custom_embed(interaction.guild_id, nama, initial_data):
             preview_embed = general_utils.create_processed_embed(initial_data, interaction.user, interaction.user, interaction.guild, interaction.channel)
-            view = EmbedEditView(nama, interaction.guild_id) # Tidak perlu interaction_message
+            view = EmbedEditView(nama, interaction.guild_id)
             await interaction.response.send_message(
                 f"Mengedit embed **{nama}**. Variabel: `{{user.name}}`, dll.", 
                 embed=preview_embed, view=view, ephemeral=True)
@@ -205,17 +207,21 @@ class EmbedCog(commands.Cog, name="Custom Embeds"):
     async def embed_edit(self, interaction: discord.Interaction, nama: str):
         if not interaction.guild_id: return await interaction.response.send_message("Hanya di server.", ephemeral=True)
         nama = nama.lower().strip()
-        existing_data = database.get_custom_embed(interaction.guild_id, nama)
+        # --- PERBAIKAN: Tambahkan 'await' ---
+        existing_data = await database.get_custom_embed(interaction.guild_id, nama)
         if not existing_data: return await interaction.response.send_message(f"Embed '{nama}' tidak ditemukan.", ephemeral=True)
+        
         preview_embed = general_utils.create_processed_embed(existing_data, interaction.user, interaction.user, interaction.guild, interaction.channel)
-        view = EmbedEditView(nama, interaction.guild_id) # Tidak perlu interaction_message
+        view = EmbedEditView(nama, interaction.guild_id)
         await interaction.response.send_message(f"Mengedit embed **{nama}**.", embed=preview_embed, view=view, ephemeral=True)
     
     @embed_group.command(name="list", description="Menampilkan semua template embed kustom di server ini.")
     async def embed_list(self, interaction: discord.Interaction):
         if not interaction.guild_id or not interaction.guild: return await interaction.response.send_message("Hanya di server.", ephemeral=True)
-        embed_names = database.get_all_custom_embed_names(interaction.guild_id)
+        # --- PERBAIKAN: Tambahkan 'await' ---
+        embed_names = await database.get_all_custom_embed_names(interaction.guild_id)
         if not embed_names: return await interaction.response.send_message("Belum ada embed kustom di server ini.", ephemeral=True)
+        
         embed = discord.Embed(title=f"Embed Kustom di {interaction.guild.name}", color=discord.Color.blue())
         embed.description = "\n".join(f"- `{name}`" for name in sorted(embed_names))
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -226,7 +232,8 @@ class EmbedCog(commands.Cog, name="Custom Embeds"):
     async def embed_remove(self, interaction: discord.Interaction, nama: str):
         if not interaction.guild_id: return await interaction.response.send_message("Hanya di server.", ephemeral=True)
         nama = nama.lower().strip()
-        if database.delete_custom_embed(interaction.guild_id, nama):
+        # --- PERBAIKAN: Tambahkan 'await' ---
+        if await database.delete_custom_embed(interaction.guild_id, nama):
             await interaction.response.send_message(f"Embed '{nama}' berhasil dihapus.", ephemeral=True)
         else: await interaction.response.send_message(f"Embed '{nama}' tidak ditemukan atau gagal dihapus.", ephemeral=True)
 
@@ -235,13 +242,14 @@ class EmbedCog(commands.Cog, name="Custom Embeds"):
     async def embed_view(self, interaction: discord.Interaction, nama: str):
         if not interaction.guild_id: return await interaction.response.send_message("Hanya di server.", ephemeral=True)
         nama = nama.lower().strip()
-        embed_data = database.get_custom_embed(interaction.guild_id, nama)
+        # --- PERBAIKAN: Tambahkan 'await' ---
+        embed_data = await database.get_custom_embed(interaction.guild_id, nama)
         if not embed_data: return await interaction.response.send_message(f"Embed '{nama}' tidak ditemukan.", ephemeral=True)
+        
         processed_embed = general_utils.create_processed_embed(embed_data, interaction.user, interaction.user, interaction.guild, interaction.channel)
         await interaction.response.send_message(f"Pratinjau embed **{nama}**:", embed=processed_embed)
 
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        # ... (Error handler cog_app_command_error sama seperti versi sebelumnya) ...
         original_error = getattr(error, 'original', error)
         command_name = interaction.command.name if interaction.command else 'N/A'
         _logger.error(f"Error pada EmbedCog command '{command_name}': {original_error}", exc_info=True)
