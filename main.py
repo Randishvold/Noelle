@@ -16,7 +16,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 # ---------------------------------------------
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
+from utils.logging_config import setup_logging # <--- Impor fungsi baru
+setup_logging() # <--- Panggil fungsi untuk setup logging
+# ---------------------------------------------
+# Logger untuk file main.py ini sekarang akan otomatis menggunakan setup di atas
 _logger = logging.getLogger("noelle_bot.main")
 
 load_dotenv()
