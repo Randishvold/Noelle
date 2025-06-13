@@ -2,19 +2,30 @@
 
 import discord
 from discord.ext import commands
+import logging
+from utils import general_utils
 from ai_services import gemini_client as gemini_services
 import asyncio
-import logging
-from utils import general_utils # Impor utilitas umum
+import argparse # Library bawaan Python untuk parsing argumen
 
 _logger = logging.getLogger("noelle_bot.basic")
 
-class BasicCommandsCog(commands.Cog, name="Perintah Dasar"): # Ubah nama Cog agar lebih sesuai
+# --- PERBAIKAN: Tambahkan definisi kelas yang hilang di sini ---
+class SafeArgumentParser(argparse.ArgumentParser):
+    """
+    Kelas turunan dari ArgumentParser yang melempar commands.BadArgument
+    alih-alih menghentikan program (SystemExit) saat terjadi error parsing.
+    Ini membuatnya aman untuk digunakan di dalam command bot.
+    """
+    def error(self, message):
+        # Override metode error bawaan
+        raise commands.BadArgument(message)
+# -----------------------------------------------------------
+
+class BasicCommandsCog(commands.Cog, name="Perintah Dasar"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         _logger.info("BasicCommandsCog (Prefix-based) dimuat.")
-
-    # --- PREFIX COMMANDS ---
 
     @commands.command(name="ping", help="Cek latensi bot ke Discord.")
     async def ping_prefix(self, ctx: commands.Context):
@@ -22,16 +33,12 @@ class BasicCommandsCog(commands.Cog, name="Perintah Dasar"): # Ubah nama Cog aga
         latency_ms = round(self.bot.latency * 1000)
         await ctx.send(f"Pong! 🏓 Latensi: **{latency_ms}** ms")
 
-    # Perintah #sapa dan #katakan dihapus sesuai permintaan.
-
-    # --- KONVERSI DARI SLASH KE PREFIX ---
-
     @commands.command(name="serverinfo", aliases=['server'], help="Menampilkan informasi tentang server ini.")
     @commands.guild_only()
     async def serverinfo_prefix(self, ctx: commands.Context):
         """Menampilkan informasi detail tentang server saat ini."""
         guild = ctx.guild
-        if not guild: return # Pengaman, meskipun sudah ada guild_only()
+        if not guild: return
 
         embed = discord.Embed(title=f"Informasi Server: {guild.name}", color=discord.Color.blue())
         if guild.icon:
@@ -41,11 +48,9 @@ class BasicCommandsCog(commands.Cog, name="Perintah Dasar"): # Ubah nama Cog aga
         embed.add_field(name="📆 Dibuat Pada", value=general_utils.format_date(guild.created_at), inline=True)
         embed.add_field(name="🆔 ID Server", value=guild.id, inline=False)
         
-        # Informasi anggota
         online_members = sum(1 for m in guild.members if m.status != discord.Status.offline)
         embed.add_field(name="👥 Anggota", value=f"**{guild.member_count}** Total\n**{online_members}** Online", inline=True)
         
-        # Informasi channel
         embed.add_field(name="💬 Channels", value=f"**{len(guild.text_channels)}** Teks\n**{len(guild.voice_channels)}** Suara", inline=True)
         
         embed.add_field(name="🎭 Jumlah Peran", value=str(len(guild.roles)), inline=True)
@@ -56,7 +61,6 @@ class BasicCommandsCog(commands.Cog, name="Perintah Dasar"): # Ubah nama Cog aga
     @commands.guild_only()
     async def userinfo_prefix(self, ctx: commands.Context, *, member: discord.Member = None):
         """Menampilkan informasi detail tentang seorang anggota server."""
-        # Jika tidak ada member yang di-mention, targetnya adalah penulis command
         target = member or ctx.author
 
         embed = discord.Embed(title=f"Informasi Pengguna: {target.display_name}", color=target.color or discord.Color.blurple())
@@ -71,7 +75,6 @@ class BasicCommandsCog(commands.Cog, name="Perintah Dasar"): # Ubah nama Cog aga
         if isinstance(target, discord.Member) and target.joined_at:
             embed.add_field(name="📥 Bergabung Server", value=general_utils.format_date(target.joined_at), inline=False)
             
-            # Ambil 5 peran teratas untuk ditampilkan agar tidak terlalu panjang
             roles = [role.mention for role in reversed(target.roles) if role.name != "@everyone"]
             if roles:
                 roles_display = ", ".join(roles[:5])
@@ -82,7 +85,7 @@ class BasicCommandsCog(commands.Cog, name="Perintah Dasar"): # Ubah nama Cog aga
                 embed.add_field(name="🎭 Peran", value="Tidak ada", inline=False)
 
         await ctx.send(embed=embed)
-        
+
     @commands.command(name="listmodels", aliases=['models'], help="Menampilkan model Gemini yang tersedia.\nContoh: #models -f flash -l 20")
     @commands.is_owner()
     async def list_models_prefix(self, ctx: commands.Context, *, args: str = ""):
@@ -96,13 +99,11 @@ class BasicCommandsCog(commands.Cog, name="Perintah Dasar"): # Ubah nama Cog aga
         if not client:
             return await ctx.send("Klien AI tidak terinisialisasi. Tidak bisa mengambil daftar model.")
 
-        # Setup parser argumen
         parser = SafeArgumentParser(add_help=False, description="Parser for listmodels command")
         parser.add_argument('-f', '--filter', type=str, default=None, help="Filter nama model")
         parser.add_argument('-l', '--limit', type=int, default=25, help="Batas tampilan per kategori")
 
         try:
-            # Parsing argumen dari input pengguna
             parsed_args = parser.parse_args(args.split())
             keyword_filter = parsed_args.filter.lower() if parsed_args.filter else None
             display_limit = parsed_args.limit
@@ -114,9 +115,8 @@ class BasicCommandsCog(commands.Cog, name="Perintah Dasar"): # Ubah nama Cog aga
         try:
             models_iterator = await asyncio.to_thread(client.models.list)
             
-            all_models = list(models_iterator) # Ambil semua model sekali saja
+            all_models = list(models_iterator)
             
-            # Terapkan filter jika ada
             if keyword_filter:
                 all_models = [m for m in all_models if keyword_filter in m.name.lower()]
 
@@ -159,10 +159,9 @@ class BasicCommandsCog(commands.Cog, name="Perintah Dasar"): # Ubah nama Cog aga
             _logger.error(f"Gagal mengambil daftar model Gemini: {e}", exc_info=True)
             await msg.edit(content=f"Terjadi error saat mengambil daftar model: `{e}`")
 
-    # --- ERROR HANDLER UNTUK COG INI ---
     async def cog_command_error(self, ctx: commands.Context, error: commands.CommandError):
         if isinstance(error, commands.NotOwner):
-            return # Perintah ini "tersembunyi" bagi non-owner
+            return
 
         if isinstance(error, commands.MissingPermissions):
             await ctx.send(f"Maaf {ctx.author.mention}, kamu tidak punya izin untuk menggunakan perintah ini.")
