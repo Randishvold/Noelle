@@ -2,7 +2,8 @@
 
 import discord
 from discord.ext import commands
-# from discord import app_commands # Kita tidak lagi menggunakan app_commands di file ini
+from ai_services import gemini_client as gemini_services
+import asyncio
 import logging
 from utils import general_utils # Impor utilitas umum
 
@@ -81,25 +82,97 @@ class BasicCommandsCog(commands.Cog, name="Perintah Dasar"): # Ubah nama Cog aga
                 embed.add_field(name="🎭 Peran", value="Tidak ada", inline=False)
 
         await ctx.send(embed=embed)
+        
+    @commands.command(name="listmodels", aliases=['models'], help="Menampilkan model Gemini yang tersedia.\nContoh: #models -f flash -l 20")
+    @commands.is_owner()
+    async def list_models_prefix(self, ctx: commands.Context, *, args: str = ""):
+        """
+        Menampilkan daftar model AI yang dapat diakses oleh bot.
+        Argumen:
+          -f, --filter: Filter nama model (case-insensitive).
+          -l, --limit: Jumlah model yang ditampilkan per kategori (default 25).
+        """
+        client = gemini_services.get_gemini_client()
+        if not client:
+            return await ctx.send("Klien AI tidak terinisialisasi. Tidak bisa mengambil daftar model.")
+
+        # Setup parser argumen
+        parser = SafeArgumentParser(add_help=False, description="Parser for listmodels command")
+        parser.add_argument('-f', '--filter', type=str, default=None, help="Filter nama model")
+        parser.add_argument('-l', '--limit', type=int, default=25, help="Batas tampilan per kategori")
+
+        try:
+            # Parsing argumen dari input pengguna
+            parsed_args = parser.parse_args(args.split())
+            keyword_filter = parsed_args.filter.lower() if parsed_args.filter else None
+            display_limit = parsed_args.limit
+        except commands.BadArgument as e:
+            return await ctx.send(f"Argumen tidak valid: {e}\nKetik `#help models` untuk bantuan.")
+
+        msg = await ctx.send(f"🔍 Mengambil daftar model dari Google AI (Filter: `{keyword_filter or 'Tidak ada'}`, Limit: `{display_limit}`)...")
+
+        try:
+            models_iterator = await asyncio.to_thread(client.models.list)
+            
+            all_models = list(models_iterator) # Ambil semua model sekali saja
+            
+            # Terapkan filter jika ada
+            if keyword_filter:
+                all_models = [m for m in all_models if keyword_filter in m.name.lower()]
+
+            base_models = [m for m in all_models if 'tuned' not in m.name]
+            tuned_models = [m for m in all_models if 'tuned' in m.name]
+            
+            embed = discord.Embed(
+                title="Daftar Model Gemini yang Tersedia",
+                description=f"Filter: `{keyword_filter or 'Tidak ada'}` | Total Ditemukan: `{len(all_models)}`",
+                color=discord.Color.green()
+            )
+
+            if base_models:
+                model_list_str = ""
+                for model in base_models[:display_limit]:
+                    clean_name = model.name.replace('models/', '')
+                    model_list_str += f"🔹 `{clean_name}`\n"
+                
+                if len(base_models) > display_limit:
+                    model_list_str += f"... dan {len(base_models) - display_limit} model lainnya."
+                
+                embed.add_field(name=f"🤖 Model Dasar ({len(base_models)})", value=model_list_str, inline=False)
+            
+            if tuned_models:
+                tuned_model_list_str = ""
+                for model in tuned_models[:display_limit]:
+                     tuned_model_list_str += f"🔸 `{model.display_name}` ({model.name})\n"
+                
+                if len(tuned_models) > display_limit:
+                    tuned_model_list_str += f"... dan {len(tuned_models) - display_limit} model lainnya."
+
+                embed.add_field(name=f"🔧 Model Hasil Tuning ({len(tuned_models)})", value=tuned_model_list_str, inline=False)
+
+            if not base_models and not tuned_models:
+                embed.description = f"Tidak ada model yang cocok dengan filter `{keyword_filter}`."
+
+            await msg.edit(content=None, embed=embed)
+
+        except Exception as e:
+            _logger.error(f"Gagal mengambil daftar model Gemini: {e}", exc_info=True)
+            await msg.edit(content=f"Terjadi error saat mengambil daftar model: `{e}`")
 
     # --- ERROR HANDLER UNTUK COG INI ---
     async def cog_command_error(self, ctx: commands.Context, error: commands.CommandError):
-        # Handler ini akan menangkap error hanya dari command di dalam cog ini
+        if isinstance(error, commands.NotOwner):
+            return # Perintah ini "tersembunyi" bagi non-owner
+
         if isinstance(error, commands.MissingPermissions):
             await ctx.send(f"Maaf {ctx.author.mention}, kamu tidak punya izin untuk menggunakan perintah ini.")
-        elif isinstance(error, commands.CommandNotFound):
-            # Sebaiknya biarkan on_command_error global yang menangani ini, atau hapus saja
-            pass 
         elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send(f"Argumen `{error.param.name}` diperlukan untuk perintah ini. Cek `{ctx.prefix}help {ctx.command.qualified_name}`")
+            await ctx.send(f"Argumen `{error.param.name}` diperlukan. Cek `{ctx.prefix}help {ctx.command.qualified_name}`")
         elif isinstance(error, commands.BadArgument) or isinstance(error, commands.MemberNotFound):
-            await ctx.send(f"Pengguna yang kamu sebutkan tidak ditemukan. Pastikan kamu me-mention pengguna yang benar.")
-        elif isinstance(error, commands.GuildNotFound):
-             await ctx.send(f"Perintah ini hanya bisa digunakan di dalam server.")
+            await ctx.send(f"Argumen atau pengguna yang kamu sebutkan tidak valid/ditemukan.")
         else:
             _logger.error(f"Error pada prefix command '{ctx.command}': {error}", exc_info=True)
             await ctx.send("Terjadi kesalahan saat menjalankan perintah itu.")
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(BasicCommandsCog(bot))

@@ -46,7 +46,7 @@ class ImageGeneratorCog(commands.Cog, name="AI Image Generator & Commands"):
     @ai_commands_group.command(name="clear_context", description="Membersihkan histori percakapan di channel AI ini.")
     async def ai_clear_context_cmd(self, interaction: discord.Interaction):
         # Check cepat, bisa langsung direspons
-        if not gemini_services.is_ai_service_enabled(): 
+        if not gemini_services.is_text_service_enabled(): 
             return await interaction.response.send_message("Layanan AI sedang tidak aktif.", ephemeral=True)
         
         # Defer karena check ini mungkin akan butuh waktu
@@ -62,7 +62,7 @@ class ImageGeneratorCog(commands.Cog, name="AI Image Generator & Commands"):
 
     @ai_commands_group.command(name="session_status", description="Menampilkan status sesi chat di channel AI ini.")
     async def ai_session_status_cmd(self, interaction: discord.Interaction):
-        if not gemini_services.is_ai_service_enabled(): 
+        if not gemini_services.is_text_service_enabled(): 
             return await interaction.response.send_message("Layanan AI sedang tidak aktif.", ephemeral=True)
         
         await interaction.response.defer(ephemeral=True)
@@ -112,8 +112,8 @@ class ImageGeneratorCog(commands.Cog, name="AI Image Generator & Commands"):
     @app_commands.guild_only()
     async def generate_image_command(self, interaction: discord.Interaction, prompt: str):
         # --- PERBAIKAN: Pindahkan semua check cepat ke atas SEBELUM defer ---
-        if not gemini_services.is_ai_service_enabled():
-            return await interaction.response.send_message("Layanan AI sedang tidak aktif.", ephemeral=True)
+        if not gemini_services.is_image_service_enabled():
+            return await interaction.response.send_message("Fitur generasi gambar saat ini tidak tersedia (model tidak ditemukan).", ephemeral=True)
         
         client = gemini_services.get_gemini_client()
         if client is None:
@@ -252,9 +252,9 @@ class ImageGeneratorCog(commands.Cog, name="AI Image Generator & Commands"):
             _logger.warning(f"Gagal kirim pesan error (mungkin interaksi sudah kedaluwarsa).")
 
 async def setup(bot: commands.Bot):
-    client = gemini_services.get_gemini_client()
-    if client is None or not gemini_services.is_ai_service_enabled():
-        _logger.error("ImageGeneratorCog: Klien Gemini tidak siap. Cog tidak dimuat.")
+    if not gemini_services.is_image_service_enabled():
+        _logger.warning("ImageGeneratorCog: Layanan Gambar AI tidak tersedia. Cog tidak akan dimuat.")
         return
+        
     await bot.add_cog(ImageGeneratorCog(bot))
     _logger.info(f"{ImageGeneratorCog.__name__} Cog berhasil dimuat.")

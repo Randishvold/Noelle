@@ -26,7 +26,7 @@ class MentionHandlerCog(commands.Cog, name="AI Mention Handler"):
 
     @commands.Cog.listener("on_message")
     async def ai_mention_listener(self, message: discord.Message):
-        if not gemini_services.is_ai_service_enabled() or \
+        if not gemini_services.is_text_service_enabled() or \
            message.author.bot or message.guild is None or \
            gemini_services.get_gemini_client() is None: return
         bot_user = self.bot.user
@@ -98,10 +98,10 @@ class MentionHandlerCog(commands.Cog, name="AI Mention Handler"):
             except GoogleAPIError as e_google: _logger.error(f"({context_log_prefix}) Error API Google: {e_google}", exc_info=True); await message.reply(f"Error API AI: {e_google}")
             except Exception as e_general: _logger.error(f"({context_log_prefix}) Error tak terduga: {e_general}", exc_info=True); await message.reply(f"Error tak terduga: {type(e_general).__name__} - {e_general}")
 
-async def setup(bot: commands.Bot): # ... (sama)
-    client = gemini_services.get_gemini_client()
-    if client is None or not gemini_services.is_ai_service_enabled():
-        _logger.error("MentionHandlerCog: Klien Gemini tidak siap. Cog tidak dimuat.")
+async def setup(bot: commands.Bot):
+    if not gemini_services.is_text_service_enabled():
+        _logger.error("MentionHandlerCog: Layanan Teks AI tidak siap. Cog tidak dimuat.")
         return
+
     await bot.add_cog(MentionHandlerCog(bot))
     _logger.info(f"{MentionHandlerCog.__name__} Cog berhasil dimuat.")
