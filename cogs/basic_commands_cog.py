@@ -113,9 +113,9 @@ class BasicCommandsCog(commands.Cog, name="Perintah Dasar"):
         msg = await ctx.send(f"🔍 Mengambil daftar model dari Google AI (Filter: `{keyword_filter or 'Tidak ada'}`, Limit: `{display_limit}`)...")
 
         try:
-            models_iterator = await asyncio.to_thread(client.models.list)
+            models_iterator = await client.aio.models.list()
             
-            all_models = list(models_iterator)
+            all_models = [model async for model in models_iterator]
             
             if keyword_filter:
                 all_models = [m for m in all_models if keyword_filter in m.name.lower()]

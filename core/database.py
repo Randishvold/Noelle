@@ -34,18 +34,16 @@ async def connect_to_mongo() -> bool:
     try:
         _logger.info("Mencoba koneksi ke MongoDB secara asinkron...")
         _mongo_client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-        # Perintah ismaster/hello adalah cara yang baik untuk memverifikasi koneksi
-        await _mongo_client.admin.command('hello') 
+        await _mongo_client.admin.command('hello') # <--- DITAMBAHKAN (untuk verifikasi koneksi)
         _logger.info("Koneksi MongoDB (motor) berhasil!")
         
         _db = _mongo_client[DATABASE_NAME]
         _embeds_collection = _db[EMBEDS_COLLECTION_NAME]
         _configs_collection = _db[CONFIGS_COLLECTION_NAME]
 
-        # Memastikan index ada saat startup adalah praktik yang baik
-        await _embeds_collection.create_index([("guild_id", 1), ("embed_name", 1)], unique=True, background=True)
+        await _embeds_collection.create_index([("guild_id", 1), ("embed_name", 1)], unique=True, background=True) # <--- DITAMBAHKAN
         _logger.info(f"Index unik dipastikan pada koleksi '{EMBEDS_COLLECTION_NAME}'.")
-        await _configs_collection.create_index([("guild_id", 1)], unique=True, background=True)
+        await _configs_collection.create_index([("guild_id", 1)], unique=True, background=True) # <--- DITAMBAHKAN
         _logger.info(f"Index unik dipastikan pada koleksi '{CONFIGS_COLLECTION_NAME}'.")
         
         return True
@@ -70,15 +68,14 @@ async def close_mongo_connection():
 # --- Fungsi CRUD Asinkron untuk Embeds ---
 
 async def save_custom_embed(guild_id: int, embed_name: str, embed_data: dict) -> bool:
-    if _embeds_collection is None: # Perbaikan: Gunakan 'is None' untuk perbandingan yang lebih aman
+    if _embeds_collection is None:
         _logger.error("Embeds collection tidak tersedia untuk save_custom_embed.")
         return False
     try:
         doc_to_save = embed_data.copy()
         doc_to_save['guild_id'] = guild_id
         doc_to_save['embed_name'] = embed_name
-        # --- PERBAIKAN KRITIS: Tambahkan 'await' ---
-        result = await _embeds_collection.replace_one({'guild_id': guild_id, 'embed_name': embed_name}, doc_to_save, upsert=True)
+        result = await _embeds_collection.replace_one({'guild_id': guild_id, 'embed_name': embed_name}, doc_to_save, upsert=True) # <--- DITAMBAHKAN
         return result.upserted_id is not None or result.modified_count > 0
     except PyMongoError as e:
         _logger.error(f"Error save_custom_embed: {e}")
@@ -89,8 +86,7 @@ async def get_custom_embed(guild_id: int, embed_name: str) -> dict | None:
         _logger.error("Embeds collection tidak tersedia untuk get_custom_embed.")
         return None
     try:
-        # --- PERBAIKAN KRITIS: Tambahkan 'await' ---
-        return await _embeds_collection.find_one({'guild_id': guild_id, 'embed_name': embed_name})
+        return await _embeds_collection.find_one({'guild_id': guild_id, 'embed_name': embed_name}) # <--- DITAMBAHKAN
     except PyMongoError as e:
         _logger.error(f"Error get_custom_embed: {e}")
         return None
@@ -101,8 +97,7 @@ async def get_all_custom_embed_names(guild_id: int) -> list[str]:
         return []
     try:
         cursor = _embeds_collection.find({'guild_id': guild_id}, {'embed_name': 1, '_id': 0})
-        # --- PERBAIKAN KRITIS: Tambahkan 'await' ---
-        return [doc['embed_name'] for doc in await cursor.to_list(length=100) if 'embed_name' in doc]
+        return [doc['embed_name'] for doc in await cursor.to_list(length=100) if 'embed_name' in doc] # <--- DITAMBAHKAN
     except PyMongoError as e:
         _logger.error(f"Error get_all_custom_embed_names: {e}")
         return []
@@ -112,8 +107,7 @@ async def delete_custom_embed(guild_id: int, embed_name: str) -> bool:
         _logger.error("Embeds collection tidak tersedia untuk delete_custom_embed.")
         return False
     try:
-        # --- PERBAIKAN KRITIS: Tambahkan 'await' ---
-        result = await _embeds_collection.delete_one({'guild_id': guild_id, 'embed_name': embed_name})
+        result = await _embeds_collection.delete_one({'guild_id': guild_id, 'embed_name': embed_name}) # <--- DITAMBAHKAN
         return result.deleted_count > 0
     except PyMongoError as e:
         _logger.error(f"Error delete_custom_embed: {e}")
@@ -126,8 +120,7 @@ async def get_server_config(guild_id: int) -> dict:
         _logger.warning("Configs collection tidak tersedia, mengembalikan config default.")
         return DEFAULT_SERVER_CONFIG.copy()
     try:
-        # --- PERBAIKAN KRITIS: Tambahkan 'await' ---
-        config_doc = await _configs_collection.find_one({'guild_id': guild_id})
+        config_doc = await _configs_collection.find_one({'guild_id': guild_id}) # <--- DITAMBAHKAN
         if config_doc:
             merged_config = DEFAULT_SERVER_CONFIG.copy()
             merged_config.update(config_doc)
@@ -135,8 +128,7 @@ async def get_server_config(guild_id: int) -> dict:
             return merged_config
         else:
             default_with_id = {'guild_id': guild_id, **DEFAULT_SERVER_CONFIG}
-            # --- PERBAIKAN KRITIS: Tambahkan 'await' ---
-            await _configs_collection.insert_one(default_with_id)
+            await _configs_collection.insert_one(default_with_id) # <--- DITAMBAHKAN
             return DEFAULT_SERVER_CONFIG.copy()
     except PyMongoError as e:
         _logger.error(f"Error get_server_config: {e}")
@@ -147,8 +139,7 @@ async def update_server_config(guild_id: int, settings_to_update: dict) -> bool:
         _logger.error("Configs collection tidak tersedia untuk update_server_config.")
         return False
     try:
-        # --- PERBAIKAN KRITIS: Tambahkan 'await' ---
-        result = await _configs_collection.update_one({'guild_id': guild_id}, {'$set': settings_to_update}, upsert=True)
+        result = await _configs_collection.update_one({'guild_id': guild_id}, {'$set': settings_to_update}, upsert=True) # <--- DITAMBAHKAN
         return result.modified_count > 0 or result.upserted_id is not None
     except PyMongoError as e:
         _logger.error(f"Error update_server_config: {e}")

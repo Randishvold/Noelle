@@ -5,8 +5,7 @@ import google.genai as genai
 from google.genai import types as genai_types
 # --- PERBAIKAN IMPOR ERROR ---
 from google.api_core.exceptions import InvalidArgument, FailedPrecondition, GoogleAPIError, DeadlineExceeded
-from google.genai.errors import ServerError# ServerError tetap dari google.genai.errors
-# -----------------------------
+from google.genai.errors import ServerError
 import datetime
 import asyncio
 from PIL import Image

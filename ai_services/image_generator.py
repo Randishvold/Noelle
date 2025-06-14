@@ -57,7 +57,7 @@ class ImageGeneratorCog(commands.Cog, name="AI Image Generator"):
             # --- PERBAIKAN FINAL DAN KRITIS ---
             # Kita harus meminta KOMBINASI [TEXT, IMAGE] seperti yang diminta oleh pesan error.
             config = genai_types.GenerateContentConfig(
-                response_modalities=[genai_types.Modality.TEXT, genai_types.Modality.IMAGE]
+                response_modalities=[genai_types.Modality.IMAGE, genai_types.Modality.TEXT]
             )
             # ------------------------------------
 
