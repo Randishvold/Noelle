@@ -40,6 +40,7 @@ COGS_TO_LOAD = [
     "cogs.basic_commands_cog",
     "cogs.moderation_cog",
     "cogs.embed_cog",
+    "ai_services.ai_commands_cog",
     "ai_services.message_handler",
     "ai_services.mention_handler",
     "ai_services.image_generator",
