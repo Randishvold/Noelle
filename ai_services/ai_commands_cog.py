@@ -7,6 +7,8 @@ import logging
 import datetime
 
 from . import gemini_client as gemini_services
+from . import deep_search_service # Impor layanan baru kita
+from utils import ai_utils 
 
 _logger = logging.getLogger("noelle_bot.ai.commands_cog")
 
@@ -23,12 +25,10 @@ class AICommandsCog(commands.Cog, name="AI Commands"):
         """Helper untuk memastikan command dijalankan di channel AI yang benar."""
         designated_name = gemini_services.get_designated_ai_channel_name().lower()
         
-        # Periksa apakah sudah direspons, jika belum, gunakan response.send_message
         send_method = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
 
         if not isinstance(interaction.channel, discord.TextChannel) or interaction.channel.name.lower() != designated_name:
             try:
-                # defer dulu jika belum
                 if not interaction.response.is_done():
                     await interaction.response.defer(ephemeral=True)
                 await interaction.followup.send(f"Perintah ini hanya bisa digunakan di channel `{gemini_services.get_designated_ai_channel_name()}`.", ephemeral=True)
@@ -41,6 +41,7 @@ class AICommandsCog(commands.Cog, name="AI Commands"):
 
     @ai_commands_group.command(name="clear_context", description="Membersihkan histori percakapan di channel AI ini.")
     async def ai_clear_context_cmd(self, interaction: discord.Interaction):
+        # ... (kode clear_context tetap sama) ...
         if not gemini_services.is_text_service_enabled(): 
             return await interaction.response.send_message("Layanan AI Teks sedang tidak aktif.", ephemeral=True)
         
@@ -54,8 +55,10 @@ class AICommandsCog(commands.Cog, name="AI Commands"):
         else: 
             await interaction.followup.send("Gagal membersihkan sesi (internal error: handler tidak ditemukan).", ephemeral=True)
 
+
     @ai_commands_group.command(name="session_status", description="Menampilkan status sesi chat di channel AI ini.")
     async def ai_session_status_cmd(self, interaction: discord.Interaction):
+        # ... (kode session_status tetap sama) ...
         if not gemini_services.is_text_service_enabled(): 
             return await interaction.response.send_message("Layanan AI Teks sedang tidak aktif.", ephemeral=True)
         
@@ -82,9 +85,53 @@ class AICommandsCog(commands.Cog, name="AI Commands"):
         else: 
             await interaction.followup.send("Gagal mendapatkan status sesi (internal error: handler tidak ditemukan).")
 
+
+    # --- PERINTAH BARU: DEEP SEARCH ---
+    @ai_commands_group.command(name="deep_search", description="Lakukan riset mendalam tentang sebuah topik menggunakan beberapa agen AI.")
+    @app_commands.describe(
+        topic="Topik yang ingin Anda teliti secara mendalam.",
+        mode="Pilih mode riset: Cepat (sedikit kueri) atau Komprehensif (lebih banyak kueri).",
+        pertanyaan_lanjutan="(Opsional) Pertanyaan spesifik untuk dijawab dalam laporan akhir."
+    )
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="Cepat (sekitar 3-4 sub-topik)", value="fast"),
+        app_commands.Choice(name="Komprehensif (sekitar 5-7 sub-topik)", value="comprehensive"),
+    ])
+    async def ai_deep_search_cmd(self, interaction: discord.Interaction, topic: str, mode: app_commands.Choice[str], pertanyaan_lanjutan: str = None):
+        """Menjalankan alur kerja deep research dan mengirimkan hasilnya."""
+        
+        # Cek apakah layanan utama AI aktif
+        if not gemini_services.is_text_service_enabled():
+            return await interaction.response.send_message("Layanan AI Teks sedang tidak aktif. Fitur ini tidak dapat digunakan.", ephemeral=True)
+        
+        # Defer respons karena proses ini akan lama. ephemeral=False agar status bisa dilihat semua orang.
+        await interaction.response.defer(ephemeral=False, thinking=True)
+
+        # Memanggil layanan inti untuk melakukan seluruh pekerjaan
+        final_report = await deep_search_service.run_deep_search(
+            interaction=interaction,
+            topic=topic,
+            mode=mode.value,
+            follow_up=pertanyaan_lanjutan
+        )
+
+        # Edit pesan status awal menjadi pesan konfirmasi selesai
+        await interaction.edit_original_response(content=f"✅ Riset mendalam untuk topik **\"{topic[:100]}\"** telah selesai. Laporan lengkap di bawah ini:", view=None)
+
+        # Gunakan utilitas yang ada untuk mengirim teks panjang dalam beberapa embed
+        await ai_utils.send_text_in_embeds(
+            target_channel=interaction.channel,
+            response_text=final_report,
+            footer_text=f"Riset mendalam diminta oleh: {interaction.user.display_name}",
+            api_candidate_obj=None, # Tidak ada candidate object tunggal untuk laporan akhir
+            is_direct_ai_response=False, # Ini adalah laporan, bukan respons langsung
+            custom_title_prefix=f"Laporan Riset: {topic[:150]}"
+        )
+
+    # ... (error handler tetap sama) ...
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        # ... (error handler tidak berubah) ...
         pass
+
 
 async def setup(bot: commands.Bot):
     if gemini_services.is_text_service_enabled() or gemini_services.is_image_service_enabled():
