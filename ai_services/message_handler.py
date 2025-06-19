@@ -30,6 +30,7 @@ class MessageHandlerCog(commands.Cog, name="AI Message Handler"):
         self.active_chat_sessions: dict[int, genai.chats.Chat] = {} 
         self.chat_session_last_active: dict[int, datetime.datetime] = {}
         self.chat_context_token_counts: dict[int, int] = {} 
+        self.deep_search_active_channels: set[int] = set()
         self.session_cleanup_loop.start()
         _logger.info("MessageHandlerCog (AI Channel) instance dibuat.")
 
@@ -111,16 +112,39 @@ class MessageHandlerCog(commands.Cog, name="AI Message Handler"):
             try: await initial_sender_for_error(err_msg, ephemeral=is_interaction)
             except Exception: _logger.error(f"({context_prefix}) Gagal kirim error akhir.", exc_info=True)
 
+
     @commands.Cog.listener("on_message")
     async def ai_channel_message_listener(self, message: discord.Message):
         if not gemini_services.is_text_service_enabled() or \
            message.author.bot or message.guild is None or \
            gemini_services.get_gemini_client() is None: return
-        if not (message.channel.name.lower() == gemini_services.get_designated_ai_channel_name().lower()): return 
+  
+        if not (message.channel.name.lower() == gemini_services.get_designated_ai_channel_name().lower()): return
+        
+        if message.channel.id in self.deep_search_active_channels:
+            _logger.debug(f"MessageHandler mengabaikan pesan di channel {message.channel.id} karena deep search aktif.")
+            return
+
+        if message.reference and message.reference.resolved:
+            if isinstance(message.reference.resolved, discord.Message):
+                if message.reference.resolved.author.id != self.bot.user.id:
+                    return
+
+        content = message.content.strip()
+        if content.startswith(('$', '!', '\\')) or \
+           content.startswith(f'<@{self.bot.user.id}>') or \
+           content.startswith(f'<@!{self.bot.user.id}>'):
+            
+            is_just_a_mention = content == f'<@{self.bot.user.id}>' or content == f'<@!{self.bot.user.id}>'
+            if not is_just_a_mention:
+                 _logger.debug(f"MessageHandler mengabaikan pesan ber-prefix di channel {message.channel.id}.")
+                 return
         bot_user = self.bot.user
         if bot_user and bot_user.mention in message.content:
             cleaned_content = message.content.replace(bot_user.mention, '').strip()
-            if not cleaned_content and not message.attachments: return 
+            if not cleaned_content and not message.attachments: 
+                return 
+
         context_log_prefix = f"AI Channel Session ({message.channel.id})"
         _logger.info(f"({context_log_prefix}) Pesan dari {message.author.name}.")
         async with message.channel.typing():
@@ -141,7 +165,7 @@ class MessageHandlerCog(commands.Cog, name="AI Message Handler"):
                 if bot_user and bot_user.mention in text_content_cleaned : text_content_cleaned = text_content_cleaned.replace(bot_user.mention, "").strip()
                 if text_content_cleaned: user_input_parts_for_api.append(text_content_cleaned)
                 image_attachments = [att for att in message.attachments if 'image' in att.content_type]
-                if image_attachments: # ... (logika attachment gambar sama) ...
+                if image_attachments: 
                     if len(image_attachments) > 4: await message.reply("Maks. 4 gambar."); return
                     for attachment in image_attachments:
                         try: image_bytes = await attachment.read(); pil_image = Image.open(io.BytesIO(image_bytes)); user_input_parts_for_api.append(pil_image)

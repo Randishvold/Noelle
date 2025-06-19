@@ -33,7 +33,7 @@ intents.message_content = True
 intents.members = True
 intents.guilds = True
 
-bot = commands.Bot(command_prefix="#", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="$", intents=intents, help_command=None)
 
 # --- Daftar Cog yang akan dimuat ---
 COGS_TO_LOAD = [
@@ -95,7 +95,7 @@ async def on_ready():
     except Exception as e:
         _logger.error(f"Gagal menyinkronkan application commands: {e}", exc_info=True)
 
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="#help | /help"))
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="$help | /help"))
     
 
 @bot.event
