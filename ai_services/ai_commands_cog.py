@@ -9,6 +9,7 @@ import datetime
 from . import gemini_client as gemini_services
 from . import deep_search_service # Impor layanan baru kita
 from utils import ai_utils 
+from utils import web_utils
 
 _logger = logging.getLogger("noelle_bot.ai.commands_cog")
 
@@ -86,7 +87,11 @@ class AICommandsCog(commands.Cog, name="AI Commands"):
             await interaction.followup.send("Gagal mendapatkan status sesi (internal error: handler tidak ditemukan).")
 
 
-    # --- PERINTAH BARU: DEEP SEARCH ---
+   # Di dalam kelas AICommandsCog
+
+    # ... (kode lainnya tetap sama) ...
+
+    # --- PERINTAH DEEP SEARCH YANG DISEMPURNAKAN ---
     @ai_commands_group.command(name="deep_search", description="Lakukan riset mendalam tentang sebuah topik menggunakan beberapa agen AI.")
     @app_commands.describe(
         topic="Topik yang ingin Anda teliti secara mendalam.",
@@ -98,35 +103,68 @@ class AICommandsCog(commands.Cog, name="AI Commands"):
         app_commands.Choice(name="Komprehensif (sekitar 5-7 sub-topik)", value="comprehensive"),
     ])
     async def ai_deep_search_cmd(self, interaction: discord.Interaction, topic: str, mode: app_commands.Choice[str], pertanyaan_lanjutan: str = None):
-        """Menjalankan alur kerja deep research dan mengirimkan hasilnya."""
+        """Menjalankan alur kerja deep research dan mengirimkan hasilnya dalam format baru."""
         
-        # Cek apakah layanan utama AI aktif
         if not gemini_services.is_text_service_enabled():
-            return await interaction.response.send_message("Layanan AI Teks sedang tidak aktif. Fitur ini tidak dapat digunakan.", ephemeral=True)
+            return await interaction.response.send_message("Layanan AI Teks sedang tidak aktif.", ephemeral=True)
         
-        # Defer respons karena proses ini akan lama. ephemeral=False agar status bisa dilihat semua orang.
         await interaction.response.defer(ephemeral=False, thinking=True)
 
-        # Memanggil layanan inti untuk melakukan seluruh pekerjaan
-        final_report = await deep_search_service.run_deep_search(
+        # 1. Panggil layanan inti untuk mendapatkan laporan terstruktur
+        structured_report = await deep_search_service.run_deep_search(
             interaction=interaction,
             topic=topic,
             mode=mode.value,
             follow_up=pertanyaan_lanjutan
         )
 
-        # Edit pesan status awal menjadi pesan konfirmasi selesai
-        await interaction.edit_original_response(content=f"✅ Riset mendalam untuk topik **\"{topic[:100]}\"** telah selesai. Laporan lengkap di bawah ini:", view=None)
+        # Cek jika layanan mengembalikan pesan error
+        if "Maaf," in structured_report or "Terjadi kesalahan" in structured_report:
+            await interaction.edit_original_response(content=structured_report, view=None)
+            return
 
-        # Gunakan utilitas yang ada untuk mengirim teks panjang dalam beberapa embed
-        await ai_utils.send_text_in_embeds(
-            target_channel=interaction.channel,
-            response_text=final_report,
-            footer_text=f"Riset mendalam diminta oleh: {interaction.user.display_name}",
-            api_candidate_obj=None, # Tidak ada candidate object tunggal untuk laporan akhir
-            is_direct_ai_response=False, # Ini adalah laporan, bukan respons langsung
-            custom_title_prefix=f"Laporan Riset: {topic[:150]}"
+        # 2. Proses dan pisahkan output terstruktur
+        summary = "Ringkasan tidak ditemukan."
+        full_report = structured_report # Fallback jika parsing gagal
+        try:
+            summary_start = structured_report.find("[SUMMARY_START]") + len("[SUMMARY_START]")
+            summary_end = structured_report.find("[SUMMARY_END]")
+            report_start = structured_report.find("[REPORT_START]") + len("[REPORT_START]")
+            
+            if summary_start != -1 and summary_end != -1 and report_start != -1:
+                summary = structured_report[summary_start:summary_end].strip()
+                full_report = structured_report[report_start:].strip()
+            else:
+                 _logger.warning("Gagal menemukan penanda di laporan AI. Menggunakan laporan penuh sebagai fallback.")
+
+        except Exception as e:
+            _logger.error(f"Error saat mem-parsing laporan AI: {e}")
+
+        # 3. Unggah laporan lengkap ke layanan paste
+        report_url = await web_utils.upload_to_paste_service(full_report)
+
+        # 4. Siapkan embed dan view untuk ditampilkan di Discord
+        embed = discord.Embed(
+            title=f"Ringkasan Riset: {topic[:150]}",
+            description=summary,
+            color=discord.Color.dark_green()
         )
+        embed.set_footer(text=f"Riset mendalam diminta oleh: {interaction.user.display_name}")
+
+        view = discord.ui.View()
+        if report_url:
+            embed.add_field(name="Laporan Lengkap", value="Klik tombol di bawah untuk melihat laporan riset yang detail.", inline=False)
+            button = discord.ui.Button(label="Buka Laporan Lengkap", style=discord.ButtonStyle.link, url=report_url, emoji="📄")
+            view.add_item(button)
+        else:
+            embed.add_field(name="Laporan Lengkap Gagal Diunggah", value="Laporan lengkap akan dikirim sebagai file.", inline=False)
+        
+        # 5. Kirim hasil akhir
+        await interaction.edit_original_response(content=f"✅ Riset mendalam untuk topik **\"{topic[:100]}\"** telah selesai.", embed=embed, view=view)
+
+        # 6. Kirim file sebagai fallback jika URL gagal dibuat
+        if not report_url:
+            await ai_utils.send_long_text_as_file(interaction.channel, full_report, "laporan_lengkap.md", "Berikut adalah laporan lengkapnya:")
 
     # ... (error handler tetap sama) ...
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):

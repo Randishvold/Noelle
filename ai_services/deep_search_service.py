@@ -35,12 +35,21 @@ Sajikan hasilnya sebagai teks informatif yang padat.
 Sub-Topik untuk Diteliti: "{sub_topic}"
 """
 
+
 REPORTER_PROMPT_TEMPLATE = """
 Anda adalah seorang Penulis Laporan AI profesional.
-Tugas Anda adalah mengambil kumpulan data penelitian yang tidak terstruktur dari berbagai sub-topik dan mensintesisnya menjadi satu laporan akhir yang koheren, terstruktur dengan baik, dan mudah dibaca.
-Mulai dengan ringkasan eksekutif, lalu detailkan setiap poin berdasarkan data yang diberikan.
-Jangan membuat informasi yang tidak ada dalam data penelitian yang disediakan.
-Gunakan format Markdown untuk heading, sub-heading, dan list agar mudah dibaca.
+Tugas Anda adalah mengambil kumpulan data penelitian mentah dan melakukan DUA hal:
+1.  Tulis sebuah Ringkasan Eksekutif yang singkat dan padat (maksimal 2-3 paragraf) dari temuan utama.
+2.  Tulis sebuah Laporan Mendalam yang komprehensif, terstruktur dengan baik, dan mudah dibaca, berdasarkan semua data yang diberikan. Gunakan format Markdown untuk heading, sub-heading, dan list.
+
+PENTING: Struktur output Anda HARUS mengikuti format ini dengan tepat, termasuk penanda [SUMMARY_START], [SUMMARY_END], dan [REPORT_START]:
+
+[SUMMARY_START]
+(Tulis ringkasan eksekutif Anda di sini.)
+[SUMMARY_END]
+
+[REPORT_START]
+(Tulis laporan mendalam lengkap Anda di sini, gunakan Markdown.)
 
 {follow_up_instructions}
 
