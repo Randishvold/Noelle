@@ -151,7 +151,9 @@ class AICommandsCog(commands.Cog, name="AI Commands"):
             except Exception as e: _logger.error(f"Error parsing: {e}")
             
             if sources:
-                sources_md = "\n\n---\n\n## Sumber Informasi\n" + "\n".join(f"- <{src}>" for src in sources)
+                sources_md = "\n\n---\n\n## Sumber Informasi\n" + "\n".join(
+                    f"- [{title.strip()}]({uri})" for uri, title in sources.items()
+                )
                 full_report += sources_md
 
             report_url = await web_utils.upload_to_paste_service(full_report)
