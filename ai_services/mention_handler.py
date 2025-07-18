@@ -5,32 +5,17 @@ import google.genai as genai
 from google.genai import types as genai_types
 from google.api_core.exceptions import InvalidArgument, FailedPrecondition, GoogleAPIError, DeadlineExceeded
 from google.genai.errors import ServerError 
-
-# -----------------------------
 import asyncio
 import logging
 
-# ... sisa kode mention_handler.py tetap sama ...
-
 from . import gemini_client as gemini_services
 from utils import ai_utils 
+from .message_handler import DEFAULT_SYSTEM_INSTRUCTION
 
 _logger = logging.getLogger("noelle_bot.ai.mention_handler")
 
-DEFAULT_SYSTEM_INSTRUCTION = """
-Anda adalah Noelle, seorang asisten AI yang berdedikasi untuk melayani anggota di server Discord ini. Kepribadian Anda didasarkan pada sifat-sifat berikut:
-
-1.  **Sangat Membantu dan Sopan:** Selalu siap membantu dengan antusias. Gunakan bahasa yang formal, sopan, dan jelas. Sapa pengguna dengan hormat. **Prioritaskan kejelasan dan berikan jawaban yang ringkas jika memungkinkan, namun jangan ragu untuk memberikan penjelasan yang lebih detail jika topik tersebut memang kompleks.**
-2.  **Rajin dan Berdedikasi:** Tanggapi setiap permintaan dengan serius seolah-olah itu adalah tugas terpenting. Tunjukkan keinginan untuk memberikan hasil terbaik.
-3.  **Rendah Hati dan Terus Belajar:** Jangan menyombongkan diri sebagai AI super canggih. Jika Anda tidak yakin atau tidak dapat menemukan informasi, akui keterbatasan Anda dengan sopan dan nyatakan bahwa Anda akan terus belajar. Misalnya, "Maaf, informasi spesifik tersebut belum ada dalam data pelatihan saya, tapi saya akan mencatatnya untuk dipelajari."
-4.  **Hindari Peran Fiksi:** Anda BUKAN seorang ksatria dari Mondstadt atau karakter dari game Genshin Impact. Anda adalah sebuah AI yang terinspirasi oleh semangat pelayanannya. Jangan pernah merujuk pada Genshin Impact, Teyvat, atau elemen-elemen fiksi lainnya.
-5.  **Fokus:** Tujuan utama Anda adalah memberikan jawaban yang akurat, membantu, dan mendukung komunitas server ini.
-
-Selalu akhiri respons Anda dengan cara yang positif dan suportif.
-"""
-
 class MentionHandlerCog(commands.Cog, name="AI Mention Handler"):
-    def __init__(self, bot: commands.Bot): # ... (sama)
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
         _logger.info("MentionHandlerCog instance dibuat.")
 
@@ -41,72 +26,61 @@ class MentionHandlerCog(commands.Cog, name="AI Mention Handler"):
            gemini_services.get_gemini_client() is None: return
         bot_user = self.bot.user
         if not (bot_user and bot_user.mention in message.content): return 
+        
         is_in_designated_ai_channel = message.channel.name.lower() == gemini_services.get_designated_ai_channel_name().lower()
-        text_content_cleaned = message.content.replace(bot_user.mention, '').strip()
-        is_just_a_mention = not text_content_cleaned and not message.attachments
-        if is_in_designated_ai_channel and not is_just_a_mention: return 
+        
+        # --- LOGIKA DISEDERHANAKAN KEMBALI ---
+        clean_content = message.content.replace(bot_user.mention, '').strip()
+
+        # Jika di channel AI, dan ada teks, biarkan message_handler yang urus
+        if is_in_designated_ai_channel and clean_content:
+            return
+            
         context_log_prefix = "Bot Mention"
         _logger.info(f"({context_log_prefix}) Memproses mention dari {message.author.name}.")
+        
         async with message.channel.typing():
             try:
-                if not text_content_cleaned: await message.reply("Halo! Ada yang bisa saya bantu?"); return
+                if not clean_content and not message.attachments:
+                    await message.reply("Halo! Ada yang bisa saya bantu?"); return
+                
                 client = gemini_services.get_gemini_client()
                 
-                # --- PERBAIKAN TOOL GROUNDING ---
-                google_search_tool = genai_types.Tool(
-                    google_search=genai_types.GoogleSearch() # Gunakan google_search
-                )
+                google_search_tool = genai_types.Tool(google_search=genai_types.GoogleSearch())
                 mention_config = genai_types.GenerateContentConfig(
                     system_instruction=DEFAULT_SYSTEM_INSTRUCTION,
                     tools=[google_search_tool]
                 )
-                # --------------------------------
                 
-                api_response = None; MAX_RETRIES = 1; retry_delay = 2 # Retry lebih sedikit untuk mention
-                for attempt in range(MAX_RETRIES + 1):
-                    try:
-                        api_response = await asyncio.to_thread(
-                            client.models.generate_content,
-                            model=gemini_services.GEMINI_TEXT_MODEL_NAME,
-                            contents=text_content_cleaned,
-                            config=mention_config
-                        )
-                        _logger.info(f"({context_log_prefix}) Respons Gemini diterima (attempt {attempt+1}).")
-                        break
-                    except (ServerError, DeadlineExceeded) as se_mention:
-                        _logger.warning(f"({context_log_prefix}) {type(se_mention).__name__} (attempt {attempt+1}/{MAX_RETRIES+1}): {se_mention}")
-                        if attempt < MAX_RETRIES:
-                            # Untuk mention, mungkin tidak perlu pesan retry ke channel, cukup log
-                            await asyncio.sleep(retry_delay); retry_delay *= 2
-                        else: raise # Re-raise jika semua retry gagal
-                if api_response is None: await message.reply("Gagal dapat respons AI setelah retry."); return
+                # Tambahkan gambar jika ada
+                user_input_parts = [clean_content] if clean_content else []
+                if message.attachments:
+                    for attachment in message.attachments:
+                        if 'image' in attachment.content_type:
+                             user_input_parts.append(Image.open(io.BytesIO(await attachment.read())))
 
-                response_text_for_utils = ""; api_candidate = None
-                if hasattr(api_response, 'candidates') and api_response.candidates:
-                    api_candidate = api_response.candidates[0]
-                    if hasattr(api_candidate, 'content') and hasattr(api_candidate.content, 'parts'):
-                        response_text_for_utils = "".join([p.text for p in api_candidate.content.parts if hasattr(p, 'text') and p.text])
-                    elif hasattr(api_candidate, 'text') and api_candidate.text: response_text_for_utils = api_candidate.text
-                elif hasattr(api_response, 'text') and api_response.text: response_text_for_utils = api_response.text
+                api_response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=gemini_services.GEMINI_TEXT_MODEL_NAME,
+                    contents=user_input_parts,
+                    config=mention_config
+                )
                 
-                if not response_text_for_utils.strip() and not (api_candidate and hasattr(api_candidate, 'citation_metadata') and api_candidate.citation_metadata):
-                    if hasattr(api_response, 'prompt_feedback') and api_response.prompt_feedback and \
-                       api_response.prompt_feedback.block_reason != genai_types.BlockedReason.BLOCKED_REASON_UNSPECIFIED:
-                        try: block_name = genai_types.BlockedReason(api_response.prompt_feedback.block_reason).name
-                        except ValueError: block_name = f"UNKNOWN_{api_response.prompt_feedback.block_reason}"
-                        await message.reply(f"Maaf, permintaan Anda diblokir ({block_name}).")
-                    else: await message.reply("Maaf, saya tidak bisa memberikan respons saat ini.")
+                response_text_for_utils = api_response.text or ""
+                api_candidate = api_response.candidates[0] if api_response.candidates else None
+                
+                if not response_text_for_utils.strip():
+                    await message.reply("Maaf, saya tidak bisa memberikan respons saat ini.")
                     return
 
                 await ai_utils.send_text_in_embeds(
                     target_channel=message.channel, response_text=response_text_for_utils,
                     footer_text=f"Untuk: {message.author.display_name}", api_candidate_obj=api_candidate,
-                    reply_to_message=message, is_direct_ai_response=True, custom_title_prefix=None
+                    reply_to_message=message, is_direct_ai_response=True
                 )
-            except (ServerError, DeadlineExceeded) as e_server: _logger.error(f"({context_log_prefix}) Error Server/Timeout Gemini: {e_server}"); await message.reply("Server AI sibuk/timeout. Coba lagi nanti.")
-            except (InvalidArgument, FailedPrecondition) as e_api_specific: _logger.warning(f"({context_log_prefix}) Error API (safety/prompt): {e_api_specific}"); await message.reply(f"Permintaan tidak dapat diproses: {e_api_specific}")
-            except GoogleAPIError as e_google: _logger.error(f"({context_log_prefix}) Error API Google: {e_google}", exc_info=True); await message.reply(f"Error API AI: {e_google}")
-            except Exception as e_general: _logger.error(f"({context_log_prefix}) Error tak terduga: {e_general}", exc_info=True); await message.reply(f"Error tak terduga: {type(e_general).__name__} - {e_general}")
+            except Exception as e_general:
+                _logger.error(f"({context_log_prefix}) Error tak terduga: {e_general}", exc_info=True)
+                await message.reply(f"Error: {e_general}")
 
 async def setup(bot: commands.Bot):
     if not gemini_services.is_text_service_enabled():
